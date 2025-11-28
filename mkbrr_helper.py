@@ -11,6 +11,7 @@ Workflow:
 """
 
 import os
+import shlex
 import subprocess
 import sys
 
@@ -70,6 +71,29 @@ def host_to_container_path(path: str) -> str:
         return CONTAINER_DATA_ROOT + suffix
 
     # Fallback: not under /mnt/user/data and not /data – pass through
+    return path
+
+
+def host_to_container_torrent_path(path: str) -> str:
+    """
+    Map a host .torrent path under HOST_OUTPUT_DIR to the container's /torrentfiles path.
+
+    If it's already a container-style path (/torrentfiles/...), leave it alone.
+    Otherwise, return as-is and let mkbrr complain if it's wrong.
+    """
+    path = path.strip()
+
+    # Already container path
+    if path.startswith(CONTAINER_OUTPUT_DIR + "/") or path == CONTAINER_OUTPUT_DIR:
+        return path
+
+    abs_path = os.path.abspath(path)
+
+    if abs_path.startswith(HOST_OUTPUT_DIR):
+        suffix = abs_path[len(HOST_OUTPUT_DIR):]
+        return CONTAINER_OUTPUT_DIR + suffix
+
+    # Fallback: unknown location, pass through
     return path
 
 
@@ -196,6 +220,57 @@ def ask_path() -> str:
     return container_path
 
 
+def ask_torrent_file() -> str:
+    """Ask for the .torrent file path to inspect."""
+    print("\n📄 Enter the path to the .torrent file to inspect:")
+    print(f"   - Host path (e.g. {HOST_OUTPUT_DIR}/my-release.torrent)")
+    print(f"   - Or container path (e.g. {CONTAINER_OUTPUT_DIR}/my-release.torrent)")
+    raw = input("\nTorrent file path: ").strip()
+
+    if not raw:
+        print("❌ No path given, aborting.")
+        raise SystemExit(1)
+
+    container_path = host_to_container_torrent_path(raw)
+
+    # Best-effort existence check for host paths
+    if raw.startswith("/mnt/"):
+        if not os.path.exists(raw):
+            print(f"⚠️  Warning: host .torrent does not exist: {raw}")
+        else:
+            print(f"✅ Host .torrent exists: {raw}")
+
+    print(f"🧩 Using container path inside mkbrr: {container_path}")
+    return container_path
+
+
+def ask_verbose() -> bool:
+    """Ask if user wants verbose output for inspect."""
+    ans = input("\n🔍 Verbose output? Show all metadata fields? [y/N]: ").strip().lower()
+    return ans in ("y", "yes", "v", "verbose")
+
+
+def ask_quiet() -> bool:
+    """Ask if user wants quiet mode (only final status/percent)."""
+    ans = input("\n🤫 Quiet mode? Only final status/percent on success. [y/N]: ").strip().lower()
+    return ans in ("y", "yes", "q", "quiet")
+
+
+def ask_workers() -> int | None:
+    """Ask for number of workers (or None for automatic)."""
+    raw = input("\n⚙️  Workers (leave empty for automatic): ").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+        if value <= 0:
+            raise ValueError
+        return value
+    except ValueError:
+        print("⚠️  Invalid workers value, ignoring.")
+        return None
+
+
 def build_command(container_path: str, preset: str) -> list[str]:
     """Build the full docker run command as a list of args."""
     return [
@@ -222,6 +297,92 @@ def build_command(container_path: str, preset: str) -> list[str]:
     ]
 
 
+def build_inspect_command(torrent_container_path: str, verbose: bool) -> list[str]:
+    """Build the docker run command for `mkbrr inspect`."""
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "-it",
+        "-w",
+        CONTAINER_CONFIG_DIR,
+        "-v",
+        f"{HOST_DATA_ROOT}:{CONTAINER_DATA_ROOT}",
+        "-v",
+        f"{HOST_OUTPUT_DIR}:{CONTAINER_OUTPUT_DIR}",
+        "-v",
+        f"{HOST_CONFIG_DIR}:{CONTAINER_CONFIG_DIR}",
+        IMAGE,
+        "mkbrr",
+        "inspect",
+        torrent_container_path,
+    ]
+    if verbose:
+        cmd.append("-v")  # mkbrr's --verbose / -v flag
+    return cmd
+
+
+def build_check_command(
+    torrent_container_path: str,
+    content_container_path: str,
+    verbose: bool,
+    quiet: bool,
+    workers: int | None,
+) -> list[str]:
+    """Build the docker run command for `mkbrr check`."""
+    cmd: list[str] = [
+        "docker",
+        "run",
+        "--rm",
+        "-it",
+        "-w",
+        CONTAINER_CONFIG_DIR,
+        "-v",
+        f"{HOST_DATA_ROOT}:{CONTAINER_DATA_ROOT}",
+        "-v",
+        f"{HOST_OUTPUT_DIR}:{CONTAINER_OUTPUT_DIR}",
+        "-v",
+        f"{HOST_CONFIG_DIR}:{CONTAINER_CONFIG_DIR}",
+        IMAGE,
+        "mkbrr",
+        "check",
+        torrent_container_path,
+        content_container_path,
+    ]
+
+    # Flags come after positional args as per mkbrr docs
+    if verbose:
+        cmd.append("-v")
+    if quiet:
+        cmd.append("--quiet")
+    if workers is not None:
+        cmd.extend(["--workers", str(workers)])
+
+    return cmd
+
+
+def choose_action() -> str:
+    """Ask the user what they want to do with mkbrr."""
+    print("\n🧰 What do you want to do?")
+    print("  [1] Create a torrent from a file/folder   (mkbrr create)")
+    print("  [2] Inspect an existing .torrent file     (mkbrr inspect)")
+    print("  [3] Check data against a .torrent file    (mkbrr check)")
+    print("  [q] Quit")
+
+    choice = input("\nChoose an option [1/2/3/q]: ").strip().lower()
+
+    if choice in ("2", "i", "inspect"):
+        return "inspect"
+    if choice in ("3", "c", "check"):
+        return "check"
+    if choice in ("q", "quit", "exit"):
+        print("👋 Bye.")
+        raise SystemExit(0)
+
+    # Default to 'create' for anything else (including empty)
+    return "create"
+
+
 def check_docker_available() -> bool:
     """Check if Docker is available on the system."""
     try:
@@ -246,31 +407,91 @@ def main() -> None:
             print("❌ Docker is not available")
             sys.exit(1)
 
-        preset = pick_preset()
-        print(f"\n🎚  Selected preset: {preset}")
+        action = choose_action()
 
-        container_path = ask_path()
+        if action == "create":
+            preset = pick_preset()
+            print(f"\n🎚  Selected preset: {preset}")
 
-        cmd = build_command(container_path, preset)
+            container_path = ask_path()
 
-        print("\n🚀 About to run:")
-        print("   " + " ".join(cmd))
-        confirm = input("\nProceed? [Y/n]: ").strip().lower()
-        if confirm not in ("", "y", "yes"):
-            print("👉 Cancelled. Nothing was run.")
-            return
+            cmd = build_command(container_path, preset)
 
-        # Run mkbrr
-        print("\n🛠  Running mkbrr... (Ctrl+C to abort)")
-        result = subprocess.run(cmd, check=False)
+            print("\n🚀 About to run:")
+            print("   " + " ".join(shlex.quote(part) for part in cmd))
+            confirm = input("\nProceed? [Y/n]: ").strip().lower()
+            if confirm not in ("", "y", "yes"):
+                print("👉 Cancelled. Nothing was run.")
+                return
 
-        if result.returncode == 0:
-            print("\n✅ mkbrr run finished.")
-            # Post-process permissions on created .torrent files
-            fix_torrent_permissions()
-        else:
-            print(f"\n❌ mkbrr exited with code {result.returncode}")
-            sys.exit(result.returncode)
+            # Run mkbrr create
+            print("\n🛠  Running mkbrr create... (Ctrl+C to abort)")
+            result = subprocess.run(cmd, check=False)
+
+            if result.returncode == 0:
+                print("\n✅ mkbrr create finished.")
+                # Post-process permissions on created .torrent files
+                fix_torrent_permissions()
+            else:
+                print(f"\n❌ mkbrr exited with code {result.returncode}")
+                sys.exit(result.returncode)
+
+        elif action == "inspect":
+            torrent_path = ask_torrent_file()
+            verbose = ask_verbose()
+
+            cmd = build_inspect_command(torrent_path, verbose)
+
+            print("\n🚀 About to run:")
+            print("   " + " ".join(shlex.quote(part) for part in cmd))
+            confirm = input("\nProceed? [Y/n]: ").strip().lower()
+            if confirm not in ("", "y", "yes"):
+                print("👉 Cancelled. Nothing was run.")
+                return
+
+            # Run mkbrr inspect
+            print("\n🛠  Running mkbrr inspect... (Ctrl+C to abort)")
+            result = subprocess.run(cmd, check=False)
+
+            if result.returncode == 0:
+                print("\n✅ mkbrr inspect finished.")
+            else:
+                print(f"\n❌ mkbrr exited with code {result.returncode}")
+                sys.exit(result.returncode)
+
+        elif action == "check":
+            torrent_path = ask_torrent_file()
+            print("\n📂 Now enter the path to the local content to verify.")
+            content_path = ask_path()
+
+            verbose = ask_verbose()
+            quiet = ask_quiet()
+            workers = ask_workers()
+
+            cmd = build_check_command(
+                torrent_container_path=torrent_path,
+                content_container_path=content_path,
+                verbose=verbose,
+                quiet=quiet,
+                workers=workers,
+            )
+
+            print("\n🚀 About to run:")
+            print("   " + " ".join(shlex.quote(part) for part in cmd))
+            confirm = input("\nProceed? [Y/n]: ").strip().lower()
+            if confirm not in ("", "y", "yes"):
+                print("👉 Cancelled. Nothing was run.")
+                return
+
+            # Run mkbrr check
+            print("\n🛠  Running mkbrr check... (Ctrl+C to abort)")
+            result = subprocess.run(cmd, check=False)
+
+            if result.returncode == 0:
+                print("\n✅ mkbrr check finished (data verified).")
+            else:
+                print(f"\n❌ mkbrr exited with code {result.returncode}")
+                sys.exit(result.returncode)
 
     except KeyboardInterrupt:
         print("\n⏹  Interrupted by user.")
