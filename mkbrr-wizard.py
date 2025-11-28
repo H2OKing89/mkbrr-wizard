@@ -380,7 +380,7 @@ def check_docker_available() -> bool:
 
 def main() -> None:
     print("==========================================")
-    print("  🧙 mkbrr Helper – Torrent Creator Wizard")
+    print("  🧙 mkbrr Wizard – Torrent Creator Assist")
     print("==========================================")
 
     try:
