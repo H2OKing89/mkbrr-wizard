@@ -88,7 +88,7 @@ def host_to_container_torrent_path(path: str) -> str:
     abs_path = os.path.abspath(path)
 
     if abs_path.startswith(HOST_OUTPUT_DIR):
-        suffix = abs_path[len(HOST_OUTPUT_DIR):]
+        suffix = abs_path[len(HOST_OUTPUT_DIR) :]
         return CONTAINER_OUTPUT_DIR + suffix
 
     # Fallback: unknown location, pass through
@@ -142,7 +142,7 @@ def load_presets_from_yaml(path: str = PRESETS_YAML_PATH) -> list[str]:
         return ["btn", "custom"]
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
     except Exception as e:
         print(f"⚠️  Failed to parse {path}: {e}. Using fallback presets: ['btn', 'custom']")
@@ -489,4 +489,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
