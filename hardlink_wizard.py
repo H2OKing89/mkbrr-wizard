@@ -109,9 +109,18 @@ def error(msg: str) -> None:
 # Episode parsing & naming
 # ---------------------------------------------------------------------------
 
-# Flexible regex: allow 2-3 digit episode numbers, variable absolute ep, optional bracket
+# Handles both standard and anime Sonarr naming, including multi-episode
+# Matches:
+#   S01E01 - 001 - Surprised to be Dead [    (anime single)
+#   S01E01-E03 - 001-003 - Episode Title [   (anime multi)
+#   S01E01 - Episode Title [                 (standard single)
+#   S01E01-E03 - Episode Title [             (standard multi)
 EP_REGEX = re.compile(
-    r"S(?P<season>\d{2})E(?P<ep>\d{2,3})\s*-\s*\d+\s*-\s*(?P<title>.+?)\s*(?:\[|$)"
+    r"S(?P<season>\d{2})E(?P<ep>\d{2,3})(?:-E\d{2,3})?"  # S01E01 or S01E01-E03
+    r"\s*-\s*"  # separator
+    r"(?:\d+(?:-\d+)?\s*-\s*)?"  # optional absolute: 001 or 001-003
+    r"(?P<title>.+?)"  # episode title
+    r"\s*(?:\[|$)"  # until [ or end
 )
 
 
@@ -177,6 +186,7 @@ def detect_audio(name: str) -> str:
         ("DTS-HD.MA", "DTS-HD.MA"),
         ("DTS-HD MA", "DTS-HD.MA"),
         ("DTS-HD", "DTS-HD"),
+        ("DTS", "DTS"),
         ("TrueHD", "TrueHD"),
         ("FLAC", "FLAC"),
         ("EAC3", "EAC3"),
@@ -200,6 +210,57 @@ def detect_codec(name: str) -> str:
     return FALLBACK_META["codec"]
 
 
+def detect_source_and_resolution(name: str) -> tuple[str, str, bool]:
+    """Parse Sonarr's [Quality Full] block more precisely.
+
+    Sonarr quality profiles:
+        HDTV-720p, HDTV-1080p, HDTV-2160p
+        WEBRip-720p, WEBRip-1080p, WEBRip-2160p
+        WEBDL-720p, WEBDL-1080p, WEBDL-2160p
+        Bluray-720p, Bluray-1080p, Bluray-2160p
+        Bluray-1080p Remux, Bluray-2160p Remux
+
+    BTN-style mapping:
+        HDTV      -> HDTV
+        WEBRip    -> WEBRip
+        WEBDL     -> WEB-DL
+        Bluray    -> BluRay
+
+    Examples:
+        [Bluray-1080p Remux] -> ('BluRay', '1080p', True)
+        [WEBDL-1080p Proper] -> ('WEB-DL', '1080p', False)
+        [WEBRip-720p]        -> ('WEBRip', '720p', False)
+        [HDTV-1080p]         -> ('HDTV', '1080p', False)
+
+    Falls back to loose detection if precise pattern not found.
+    """
+    # Look for the quality block pattern matching Sonarr's format
+    m = re.search(
+        r"\[(?P<source>Bluray|HDTV|WEBDL|WEBRip)"
+        r"-(?P<res>720p|1080p|2160p)"
+        r"(?P<remux>\s+Remux)?"
+        r"[^\]]*\]",
+        name,
+        re.IGNORECASE,
+    )
+    if m:
+        source_raw = m.group("source").lower()
+        # Map Sonarr quality names to BTN-style source tags
+        source_map = {
+            "bluray": "BluRay",
+            "hdtv": "HDTV",
+            "webdl": "WEB-DL",
+            "webrip": "WEBRip",
+        }
+        return (
+            source_map.get(source_raw, "BluRay"),
+            m.group("res"),
+            bool(m.group("remux")),
+        )
+    # Fall back to loose detection
+    return (detect_source(name), detect_resolution(name), detect_remux(name))
+
+
 def detect_season_metadata(season_dir: Path) -> SeasonMeta:
     """Detect common metadata for a season from the first few .mkv episodes.
 
@@ -209,13 +270,15 @@ def detect_season_metadata(season_dir: Path) -> SeasonMeta:
     metadata_samples: list[SeasonMeta] = []
     for src_file in sorted(season_dir.glob("*.mkv"))[:3]:  # Check first 3 files
         stem = src_file.stem
+        # Use precise Sonarr detection first, falls back to loose detection
+        source, resolution, remux = detect_source_and_resolution(stem)
         metadata_samples.append(
             {
-                "resolution": detect_resolution(stem),
-                "source": detect_source(stem),
+                "resolution": resolution,
+                "source": source,
                 "audio": detect_audio(stem),
                 "codec": detect_codec(stem),
-                "remux": detect_remux(stem),
+                "remux": remux,
             }
         )
 
