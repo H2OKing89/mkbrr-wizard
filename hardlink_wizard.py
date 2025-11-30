@@ -17,9 +17,12 @@ Flow:
 """
 
 import errno
+import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +36,7 @@ DEFAULT_DST_ROOT = Path("/mnt/user/data/downloads/torrents/qbittorrent/seedvault
 DEFAULT_GROUP = "H2OKing"
 DEFAULT_DRY_RUN = True  # script will ask, this is just the default
 DEFAULT_LOG_DIR = Path.home() / ".local" / "share" / "hardlink-wizard"
+USE_MEDIAINFO = True  # Use mediainfo for accurate metadata detection if available
 
 
 # ---------------------------------------------------------------------------
@@ -292,16 +296,232 @@ def detect_source_and_resolution(name: str) -> tuple[str, str, bool]:
     return (detect_source(name), detect_resolution(name), detect_remux(name))
 
 
+# ---------------------------------------------------------------------------
+# MediaInfo-based metadata detection (more accurate than filename parsing)
+# ---------------------------------------------------------------------------
+
+
+def has_mediainfo() -> bool:
+    """Check if mediainfo is available on the system."""
+    return shutil.which("mediainfo") is not None
+
+
+def get_mediainfo_json(file_path: Path) -> dict[str, object] | None:
+    """Run mediainfo and return parsed JSON output."""
+    try:
+        result = subprocess.run(
+            ["mediainfo", "--Output=JSON", str(file_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            data: dict[str, object] = json.loads(result.stdout)
+            return data
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
+        logging.warning("MediaInfo failed for %s: %s", file_path, e)
+    return None
+
+
+def get_track_by_type(
+    media_info: dict[str, object], track_type: str, order: int = 1
+) -> dict[str, object] | None:
+    """Get a specific track from mediainfo output by type and order."""
+    media = media_info.get("media")
+    if not isinstance(media, dict):
+        return None
+    tracks = media.get("track", [])
+    if not isinstance(tracks, list):
+        return None
+    count = 0
+    for track in tracks:
+        if isinstance(track, dict) and track.get("@type") == track_type:
+            count += 1
+            if count == order:
+                return track
+    return None
+
+
+def _get_str(track: dict[str, object], key: str, default: str = "") -> str:
+    """Safely extract a string value from a mediainfo track."""
+    value = track.get(key, default)
+    return str(value) if value is not None else default
+
+
+def detect_metadata_from_mediainfo(file_path: Path) -> SeasonMeta | None:
+    """Extract BTN-compliant metadata directly from file using mediainfo.
+
+    Returns None if mediainfo fails or isn't available.
+    """
+    if not USE_MEDIAINFO or not has_mediainfo():
+        return None
+
+    info = get_mediainfo_json(file_path)
+    if not info:
+        return None
+
+    # Get video track
+    video = get_track_by_type(info, "Video")
+    if not video:
+        return None
+
+    # Get primary (default) audio track
+    audio = get_track_by_type(info, "Audio")
+
+    # --- Resolution ---
+    height = _get_str(video, "Height")
+    scan_type = _get_str(video, "ScanType", "Progressive")
+    if height:
+        height_int = int(height.replace(" ", ""))
+        # Determine interlaced vs progressive
+        suffix = "i" if scan_type.lower() == "interlaced" else "p"
+        # Normalize to standard resolutions
+        if height_int >= 2160:
+            resolution = f"2160{suffix}"
+        elif height_int >= 1080:
+            resolution = f"1080{suffix}"
+        elif height_int >= 720:
+            resolution = f"720{suffix}"
+        elif height_int >= 576:
+            resolution = "576p"
+        elif height_int >= 480:
+            resolution = "480p"
+        else:
+            resolution = f"{height_int}{suffix}"
+    else:
+        resolution = FALLBACK_META["resolution"]
+
+    # --- Video Codec ---
+    format_name = _get_str(video, "Format").upper()
+    codec_map = {
+        "AVC": "H.264",
+        "H.264": "H.264",
+        "HEVC": "H.265",
+        "H.265": "H.265",
+        "VP9": "VP9",
+        "AV1": "AV1",
+        "MPEG-2": "MPEG2",
+        "MPEG2": "MPEG2",
+        "XVID": "Xvid",
+        "DIVX": "DivX",
+    }
+    codec = codec_map.get(format_name, format_name if format_name else FALLBACK_META["codec"])
+
+    # --- Source (from filename/metadata, mediainfo can't reliably detect this) ---
+    general = get_track_by_type(info, "General")
+    title = _get_str(general, "Title") if general else ""
+    extra = video.get("extra")
+    original_source = ""
+    if isinstance(extra, dict):
+        original_source = str(extra.get("OriginalSourceMedium", ""))
+
+    if "blu-ray" in original_source.lower() or "bluray" in title.lower():
+        source = "BluRay"
+    elif "web" in title.lower():
+        source = "WEB-DL"
+    elif "hdtv" in title.lower():
+        source = "HDTV"
+    else:
+        # Fall back to filename-based detection
+        source = detect_source(file_path.stem)
+
+    # --- Remux detection ---
+    remux = "remux" in title.lower() or "remux" in file_path.stem.lower()
+
+    # --- Audio ---
+    if audio:
+        audio_format = _get_str(audio, "Format")
+        audio_commercial = _get_str(audio, "Format_Commercial_IfAny")
+        channels = _get_str(audio, "Channels", "2")
+        audio_title = _get_str(audio, "Title")
+
+        # Convert channel count to BTN format (6 -> 5.1, 8 -> 7.1, 2 -> 2.0, 1 -> 1.0)
+        try:
+            ch_count = int(channels)
+            if ch_count >= 8:
+                ch_str = "7.1"
+            elif ch_count >= 6:
+                ch_str = "5.1"
+            elif ch_count == 1:
+                ch_str = "1.0"
+            else:
+                ch_str = "2.0"
+        except ValueError:
+            ch_str = "2.0"
+
+        # Check for Atmos
+        has_atmos = "atmos" in audio_commercial.lower() or "atmos" in audio_title.lower()
+
+        # Map audio format to BTN label
+        audio_format_upper = audio_format.upper()
+        audio_commercial_upper = audio_commercial.upper()
+        if "MLP FBA" in audio_format_upper or "TRUEHD" in audio_commercial_upper:
+            audio_label = "TrueHDA" if has_atmos else "TrueHD"
+        elif (
+            "E-AC-3" in audio_format_upper
+            or "DDP" in audio_commercial_upper
+            or "DD+" in audio_commercial
+        ):
+            audio_label = "DDPA" if has_atmos else "DDP"
+        elif "AC-3" in audio_format_upper or audio_format_upper == "AC3":
+            audio_label = "DD"
+        elif "DTS-HD MA" in audio_commercial_upper:
+            audio_label = "DTS-HD.MA"
+        elif "DTS-HD" in audio_commercial_upper:
+            audio_label = "DTS-HD"
+        elif "DTS" in audio_format_upper:
+            audio_label = "DTS"
+        elif "AAC" in audio_format_upper:
+            audio_label = "AAC"
+        elif "FLAC" in audio_format_upper:
+            audio_label = "FLAC"
+        elif "PCM" in audio_format_upper or "LPCM" in audio_format_upper:
+            audio_label = "LPCM"
+        elif "OPUS" in audio_format_upper:
+            audio_label = "Opus"
+        else:
+            audio_label = FALLBACK_META["audio"]
+
+        audio_token = f"{audio_label}{ch_str}"
+    else:
+        audio_token = f"{FALLBACK_META['audio']}2.0"
+
+    return {
+        "resolution": resolution,
+        "source": source,
+        "audio": audio_token,
+        "codec": codec,
+        "remux": remux,
+    }
+
+
 def detect_season_metadata(season_dir: Path) -> SeasonMeta:
     """Detect common metadata for a season from the first few .mkv episodes.
+
+    Uses mediainfo for accurate detection if available, otherwise falls back
+    to filename parsing.
 
     Checks up to 3 files to verify consistency and warns if metadata differs.
     Falls back to centralized FALLBACK_META if nothing is found.
     """
     metadata_samples: list[SeasonMeta] = []
-    for src_file in sorted(season_dir.glob("*.mkv"))[:3]:  # Check first 3 files
+    mkv_files = sorted(season_dir.glob("*.mkv"))[:3]  # Check first 3 files
+
+    # Check if mediainfo is available (only check once)
+    use_mi = USE_MEDIAINFO and has_mediainfo()
+    if use_mi and mkv_files:
+        log("📊 Using mediainfo for metadata detection...")
+
+    for src_file in mkv_files:
+        # Try mediainfo first
+        if use_mi:
+            mi_meta = detect_metadata_from_mediainfo(src_file)
+            if mi_meta:
+                metadata_samples.append(mi_meta)
+                continue
+
+        # Fall back to filename parsing
         stem = src_file.stem
-        # Use precise Sonarr detection first, falls back to loose detection
         source, resolution, remux = detect_source_and_resolution(stem)
         metadata_samples.append(
             {
@@ -710,6 +930,13 @@ def main() -> None:
     if log_file:
         log(f"📝 Logging to: {log_file}")
 
+    # Check for mediainfo
+    if USE_MEDIAINFO:
+        if has_mediainfo():
+            log("✅ mediainfo detected - using accurate file-based metadata")
+        else:
+            log("⚠️  mediainfo not found - falling back to filename parsing")
+
     try:
         src_root = ask_src_root()
         seasons_all = find_season_dirs(src_root)
@@ -727,6 +954,18 @@ def main() -> None:
             raise SystemExit(1)
 
         dry_run = ask_dry_run()
+
+        # Preview detected metadata from first selected season
+        if seasons_selected:
+            first_season_dir = seasons_selected[0][1]
+            preview_meta = detect_season_metadata(first_season_dir)
+            log("\n------ Detected Metadata ------")
+            log(f"Resolution:       {preview_meta['resolution']}")
+            log(f"Source:           {preview_meta['source']}")
+            log(f"Audio:            {preview_meta['audio']}")
+            log(f"Codec:            {preview_meta['codec']}")
+            log(f"Remux:            {'Yes' if preview_meta['remux'] else 'No'}")
+            log("-------------------------------")
 
         log("\n------ Configuration ------")
         log(f"Source root:      {src_root}")
