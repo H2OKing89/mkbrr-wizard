@@ -37,6 +37,7 @@ DEFAULT_GROUP = "H2OKing"
 DEFAULT_DRY_RUN = True  # script will ask, this is just the default
 DEFAULT_LOG_DIR = Path.home() / ".local" / "share" / "hardlink-wizard"
 USE_MEDIAINFO = True  # Use mediainfo for accurate metadata detection if available
+VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m2ts", ".ts"}  # Supported video extensions
 
 
 # ---------------------------------------------------------------------------
@@ -150,12 +151,13 @@ def slugify_title(title: str) -> str:
     'Surprised to be Dead' -> 'Surprised.to.be.Dead'
     'Yusuke vs. Rando 99 Attacks' -> 'Yusuke.vs.Rando.99.Attacks'
     "Don't Stop" -> 'Dont.Stop'
+    "I'll Be There" -> 'Ill.Be.There'
+    "We've Got" -> 'Weve.Got'
 
-    Note: Some edge cases like "Rock 'n' Roll" or "'Twas the Night" will
-    have apostrophes converted to dots. This is acceptable for BTN naming.
+    All apostrophes are stripped to avoid BTN naming issues.
     """
-    # Remove common contractions before general replacement
-    s = re.sub(r"([A-Za-z])'([st])\b", r"\1\2", title)  # don't -> dont, it's -> its
+    # Strip all apostrophes first (handles don't, I'll, we've, 'twas, rock'n'roll, etc.)
+    s = title.replace("'", "").replace("'", "").replace("'", "")  # ASCII and curly apostrophes
     s = re.sub(r"[^A-Za-z0-9]+", ".", s)
     s = re.sub(r"\.+", ".", s)  # collapse multiple dots
     return s.strip(".")
@@ -495,24 +497,30 @@ def detect_metadata_from_mediainfo(file_path: Path) -> SeasonMeta | None:
     }
 
 
-def detect_season_metadata(season_dir: Path) -> SeasonMeta:
-    """Detect common metadata for a season from the first few .mkv episodes.
+def detect_season_metadata(season_dir: Path, quiet: bool = False) -> SeasonMeta:
+    """Detect common metadata for a season from the first few video files.
 
     Uses mediainfo for accurate detection if available, otherwise falls back
     to filename parsing.
 
     Checks up to 3 files to verify consistency and warns if metadata differs.
     Falls back to centralized FALLBACK_META if nothing is found.
+
+    Args:
+        season_dir: Path to the season directory.
+        quiet: If True, suppress the "Using mediainfo" log message.
     """
     metadata_samples: list[SeasonMeta] = []
-    mkv_files = sorted(season_dir.glob("*.mkv"))[:3]  # Check first 3 files
+    video_files = sorted(f for f in season_dir.iterdir() if f.suffix.lower() in VIDEO_EXTS)[
+        :3
+    ]  # Check first 3 files
 
     # Check if mediainfo is available (only check once)
     use_mi = USE_MEDIAINFO and has_mediainfo()
-    if use_mi and mkv_files:
+    if use_mi and video_files and not quiet:
         log("📊 Using mediainfo for metadata detection...")
 
-    for src_file in mkv_files:
+    for src_file in video_files:
         # Try mediainfo first
         if use_mi:
             mi_meta = detect_metadata_from_mediainfo(src_file)
@@ -785,6 +793,19 @@ def ask_dst_root(default_dst: Path = DEFAULT_DST_ROOT) -> Path:
     return p
 
 
+def find_existing_parent(path: Path) -> Path:
+    """Find the first existing parent directory of a path.
+
+    Used to validate filesystem compatibility when destination doesn't exist yet.
+    """
+    while not path.exists():
+        parent = path.parent
+        if parent == path:  # Hit filesystem root
+            break
+        path = parent
+    return path
+
+
 def ask_dry_run(default: bool = DEFAULT_DRY_RUN) -> bool:
     default_label = "Y/n" if default else "y/N"
     ans = input(f"\n🧪 Dry-run only (no changes)? [{default_label}]: ").strip().lower()
@@ -813,17 +834,20 @@ def process_seasons(
     errors = 0
     would_link = 0
 
+    first_season = True
     for season_num, season_dir in seasons:
         log(f"\n--- Processing {season_dir.name} (Season {season_num:02d}) ---")
 
-        mkv_files = sorted(season_dir.glob("*.mkv"))
-        if not mkv_files:
-            warn(f"No .mkv files found in {season_dir}, skipping this season.")
+        video_files = sorted(f for f in season_dir.iterdir() if f.suffix.lower() in VIDEO_EXTS)
+        if not video_files:
+            warn(f"No video files found in {season_dir}, skipping this season.")
             continue
 
-        season_meta = detect_season_metadata(season_dir)
+        # Only log mediainfo message on first season to reduce spam
+        season_meta = detect_season_metadata(season_dir, quiet=not first_season)
+        first_season = False
 
-        for src_file in mkv_files:
+        for src_file in video_files:
             stem = src_file.stem
 
             parsed = parse_episode_info(stem)
@@ -945,8 +969,9 @@ def main() -> None:
         group = ask_group()
         dst_root = ask_dst_root()
 
-        # Validate filesystem before processing
-        if dst_root.exists() and not validate_same_filesystem(src_root, dst_root):
+        # Validate filesystem before processing (check existing parent if dest doesn't exist)
+        check_path = dst_root if dst_root.exists() else find_existing_parent(dst_root)
+        if not validate_same_filesystem(src_root, check_path):
             error(
                 f"Source ({src_root}) and destination ({dst_root}) are on different filesystems.\n"
                 f"       Hardlinks require both paths to be on the same filesystem."
