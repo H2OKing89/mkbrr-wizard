@@ -181,34 +181,51 @@ def detect_audio(name: str) -> str:
     """Map whatever is in the filename to BTN-style audio token (codec + channels).
 
     BTN format: codec followed by channels with no separator.
+
+    BTN Audio Codecs:
+        AAC, DD (AC-3), DDP (E-AC-3/DD+), DTS, DTS-HD.HRA, DTS-HD.MA,
+        FLAC, LPCM, TrueHD
+
+    Atmos: Append 'A' to codec (DDPA, TrueHDA)
+
+    Channels: 1.0 (mono), 2.0 (stereo), 5.1 (surround), 7.1 (surround)
+
     Examples:
         'TrueHD 5.1' -> 'TrueHD5.1'
+        'TrueHD 7.1 Atmos' -> 'TrueHDA7.1'
         'DTS-HD MA 5.1' -> 'DTS-HD.MA5.1'
+        'DD+ 5.1' -> 'DDP5.1'
+        'AC3 5.1' -> 'DD5.1'
         'AAC 2.0' -> 'AAC2.0'
-        'FLAC 2.0' -> 'FLAC2.0'
-        'DDP 5.1 Atmos' -> 'DDP5.1'
+        'Atmos TrueHD 7.1' -> 'TrueHDA7.1'
     """
     # Try to extract channels (e.g., 5.1, 7.1, 2.0, 1.0)
     channels_match = re.search(r"(\d\.\d)", name)
     channels = channels_match.group(1) if channels_match else "2.0"  # default to stereo
 
+    # Check for Atmos (adds 'A' suffix to codec)
+    has_atmos = bool(re.search(r"atmos", name, re.IGNORECASE))
+
     # Audio codec detection (order matters - check specific before general)
+    # Returns (pattern, base_label, supports_atmos)
     audio_codecs = [
-        (r"DTS[-\s]?HD[\s.]?MA", "DTS-HD.MA"),
-        (r"DTS[-\s]?HD", "DTS-HD"),
-        (r"DTS", "DTS"),
-        (r"TrueHD", "TrueHD"),
-        (r"FLAC", "FLAC"),
-        (r"EAC3|E-AC-3", "EAC3"),
-        (r"DDP|DD\+|Dolby\s*Digital\s*Plus", "DDP"),
-        (r"AC3|DD[^\+P]|Dolby\s*Digital(?!\s*Plus)", "DD"),
-        (r"AAC", "AAC"),
-        (r"LPCM|PCM", "LPCM"),
-        (r"Opus", "Opus"),
+        (r"DTS[-\s]?HD[\s.]?MA", "DTS-HD.MA", False),
+        (r"DTS[-\s]?HD[\s.]?HRA?", "DTS-HD.HRA", False),
+        (r"DTS[-\s]?HD", "DTS-HD", False),
+        (r"DTS", "DTS", False),
+        (r"TrueHD", "TrueHD", True),  # TrueHD can have Atmos
+        (r"FLAC", "FLAC", False),
+        (r"EAC3|E-AC-?3|DDP|DD\+|Dolby\s*Digital\s*Plus", "DDP", True),  # DDP can have Atmos
+        (r"AC3|Dolby\s*Digital(?!\s*Plus)", "DD", False),  # BTN uses DD for AC-3
+        (r"AAC", "AAC", False),
+        (r"LPCM|PCM", "LPCM", False),
+        (r"Opus", "Opus", False),
     ]
 
-    for pattern, label in audio_codecs:
+    for pattern, label, supports_atmos in audio_codecs:
         if re.search(pattern, name, re.IGNORECASE):
+            if has_atmos and supports_atmos:
+                return f"{label}A{channels}"  # e.g., TrueHDA7.1, DDPA5.1
             return f"{label}{channels}"
 
     # Fallback
@@ -318,9 +335,15 @@ def build_dest_filename(
     title: str,
     season_meta: SeasonMeta,
 ) -> str:
-    """Build BTN-esque filename based on season metadata.
+    """Build BTN-compliant filename based on season metadata.
 
-    Series.SxxExx.Ep.Title.Resolution.Source[.Remux].Audio.Codec-Group.mkv
+    BTN Format: Series.Name.SXXEXX.Episode.Title.Resolution.Source[.Remux].Audio.Codec-Group.mkv
+
+    Per BTN rules:
+    - Only allowed chars: a-z, A-Z, 0-9, . (dot), - (hyphen before group)
+    - Resolution: 1080p/1080i/720p required; 576p/480p optional
+    - Audio: codec + channels (e.g., TrueHD5.1, DD5.1, AAC2.0)
+    - Group: Must have hyphen before group name
 
     Uses season_meta for consistent naming across all episodes in a season.
     """
@@ -354,10 +377,16 @@ def season_pack_dir(
     group: str,
     season_meta: SeasonMeta,
 ) -> Path:
-    """Compute the season pack directory name used for BTN-style folders.
+    """Compute the season pack directory name per BTN rules.
 
-    Example (BluRay remux):
-      Yu.Yu.Hakusho.S01.1080p.BluRay.Remux.TrueHD.H.264-H2OKing
+    BTN Format: Series.Name.SXX.Resolution.Source[.Remux].Audio.Codec-Group
+
+    Examples:
+        Yu.Yu.Hakusho.S01.1080p.BluRay.Remux.TrueHD5.1.H.264-H2OKing
+        Breaking.Bad.S01.720p.BluRay.DD5.1.H.264-H2OKing
+        The.Office.US.S01.HDTV.AAC2.0.H.264-LOL
+
+    Per BTN: Folder names should be the same as the pack's release name.
     """
     resolution = season_meta["resolution"]
     source = season_meta["source"]
