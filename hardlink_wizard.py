@@ -775,9 +775,10 @@ def guess_series_slug(src_root: Path) -> str:
 
 
 def ask_series_slug(src_root: Path) -> str:
-    guess = guess_series_slug(src_root)
-    ans = input(f"\n🏷  Series slug (BTN-style) [{guess}]: ").strip()
-    return ans or guess
+    """Auto-generate the series slug from the source folder name."""
+    slug = guess_series_slug(src_root)
+    print(f"\n🏷  Series slug: {slug}")
+    return slug
 
 
 def ask_group(default_group: str = DEFAULT_GROUP) -> str:
