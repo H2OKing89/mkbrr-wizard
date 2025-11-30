@@ -52,7 +52,7 @@ class SeasonMeta(TypedDict):
 FALLBACK_META: SeasonMeta = {
     "resolution": "1080p",
     "source": "BluRay",
-    "audio": "TrueHD",
+    "audio": "TrueHD",  # Channel info added dynamically by detect_audio()
     "codec": "H.264",
     "remux": True,
 }
@@ -178,27 +178,41 @@ def detect_remux(name: str) -> bool:
 
 
 def detect_audio(name: str) -> str:
-    """Map whatever is in the filename to a compact label.
+    """Map whatever is in the filename to BTN-style audio token (codec + channels).
 
-    e.g. 'TrueHD 5.1' -> 'TrueHD', 'DTS-HD MA' -> 'DTS-HD.MA'
+    BTN format: codec followed by channels with no separator.
+    Examples:
+        'TrueHD 5.1' -> 'TrueHD5.1'
+        'DTS-HD MA 5.1' -> 'DTS-HD.MA5.1'
+        'AAC 2.0' -> 'AAC2.0'
+        'FLAC 2.0' -> 'FLAC2.0'
+        'DDP 5.1 Atmos' -> 'DDP5.1'
     """
-    candidates = [
-        ("DTS-HD.MA", "DTS-HD.MA"),
-        ("DTS-HD MA", "DTS-HD.MA"),
-        ("DTS-HD", "DTS-HD"),
-        ("DTS", "DTS"),
-        ("TrueHD", "TrueHD"),
-        ("FLAC", "FLAC"),
-        ("EAC3", "EAC3"),
-        ("DDP", "DDP"),
-        ("AC3", "AC3"),
-        ("AAC", "AAC"),
+    # Try to extract channels (e.g., 5.1, 7.1, 2.0, 1.0)
+    channels_match = re.search(r"(\d\.\d)", name)
+    channels = channels_match.group(1) if channels_match else "2.0"  # default to stereo
+
+    # Audio codec detection (order matters - check specific before general)
+    audio_codecs = [
+        (r"DTS[-\s]?HD[\s.]?MA", "DTS-HD.MA"),
+        (r"DTS[-\s]?HD", "DTS-HD"),
+        (r"DTS", "DTS"),
+        (r"TrueHD", "TrueHD"),
+        (r"FLAC", "FLAC"),
+        (r"EAC3|E-AC-3", "EAC3"),
+        (r"DDP|DD\+|Dolby\s*Digital\s*Plus", "DDP"),
+        (r"AC3|DD[^\+P]|Dolby\s*Digital(?!\s*Plus)", "DD"),
+        (r"AAC", "AAC"),
+        (r"LPCM|PCM", "LPCM"),
+        (r"Opus", "Opus"),
     ]
-    lower = name.lower()
-    for needle, label in candidates:
-        if needle.lower() in lower:
-            return label
-    return FALLBACK_META["audio"]
+
+    for pattern, label in audio_codecs:
+        if re.search(pattern, name, re.IGNORECASE):
+            return f"{label}{channels}"
+
+    # Fallback
+    return f"{FALLBACK_META['audio']}{channels}"
 
 
 def detect_codec(name: str) -> str:
