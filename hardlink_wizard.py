@@ -698,6 +698,9 @@ def ask_src_root() -> Path:
         error("No path given, aborting.")
         raise SystemExit(1)
 
+    # Strip surrounding quotes (handles copy-paste from file managers/terminals)
+    raw = raw.strip("\"'")
+
     p = Path(os.path.expanduser(raw)).resolve()
     if not p.is_dir():
         error(f"Source root does not exist or is not a directory: {p}")
@@ -835,7 +838,6 @@ def process_seasons(
     errors = 0
     would_link = 0
 
-    first_season = True
     for season_num, season_dir in seasons:
         log(f"\n--- Processing {season_dir.name} (Season {season_num:02d}) ---")
 
@@ -844,9 +846,8 @@ def process_seasons(
             warn(f"No video files found in {season_dir}, skipping this season.")
             continue
 
-        # Only log mediainfo message on first season to reduce spam
-        season_meta = detect_season_metadata(season_dir, quiet=not first_season)
-        first_season = False
+        # Always suppress mediainfo message during processing (already shown in preview)
+        season_meta = detect_season_metadata(season_dir, quiet=True)
 
         for src_file in video_files:
             stem = src_file.stem
