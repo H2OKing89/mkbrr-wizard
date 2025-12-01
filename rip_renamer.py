@@ -537,6 +537,28 @@ def detect_metadata_from_file(file_path: Path) -> dict[str, Any]:
     return metadata
 
 
+def detect_sample_metadata(discs: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Detect metadata from a sample file from the first disc.
+    Used to determine output folder naming before processing.
+    """
+    for disc in discs:
+        files = disc.get("files", [])
+        if files:
+            # Get the first (or second if available) file for sampling
+            sample_file = files[1] if len(files) > 1 else files[0]
+            return detect_metadata_from_file(sample_file)
+    # Fallback defaults
+    return {
+        "resolution": "1080p",
+        "source": "Bluray",
+        "codec": "H.264 8bit",
+        "audio": "FLAC 2.0",
+        "remux": True,
+        "languages": ["JA"],
+    }
+
+
 # ─────────────────────────── TMDB API ───────────────────────────
 
 # Retry settings
@@ -666,12 +688,6 @@ def get_tmdb_tv_details(tmdb_id: int, api_key: str) -> dict | None:
     if result and isinstance(result, dict):
         return result
     return None
-
-
-def fetch_tmdb_episodes(tmdb_id: int, season: int, api_key: str) -> dict[int, str]:
-    """Fetch episode titles for a season. Results are cached."""
-    details = fetch_tmdb_episode_details(tmdb_id, season, api_key)
-    return {ep_num: ep_info["title"] for ep_num, ep_info in details.items()}
 
 
 def fetch_tmdb_episode_details(tmdb_id: int, season: int, api_key: str) -> dict[int, dict]:
@@ -920,6 +936,22 @@ def parse_folder_name(folder_name: str) -> dict[str, Any]:
     return result
 
 
+# Patterns to skip during folder discovery
+SKIP_FOLDER_PATTERNS = [
+    r"\.old$",  # Backup folders
+    r"\.bak$",
+    r"\.backup$",
+    r"\(\d{4}\)$",  # Output folders like "Series Name (2021)"
+    r"^_",  # Hidden/temp folders
+    r"^\.",  # Dotfiles/folders
+]
+
+
+def should_skip_folder(name: str) -> bool:
+    """Check if folder should be skipped based on skip patterns."""
+    return any(re.search(p, name, re.IGNORECASE) for p in SKIP_FOLDER_PATTERNS)
+
+
 def discover_disc_folders(base_path: Path) -> list[dict[str, Any]]:
     """
     Discover disc folders in MakeMKV directory.
@@ -927,6 +959,11 @@ def discover_disc_folders(base_path: Path) -> list[dict[str, Any]]:
     Handles two structures:
     1. Nested: MakeMKV/SeriesName/SeriesName BD1/
     2. Flat: MakeMKV/SeriesName BD1/
+
+    Skips:
+    - Output folders (contain year like "Series Name (2021)")
+    - Backup folders (.old, .bak, .backup)
+    - Hidden folders (starting with _ or .)
     """
     discovered: list[dict[str, Any]] = []
 
@@ -936,6 +973,11 @@ def discover_disc_folders(base_path: Path) -> list[dict[str, Any]]:
 
     for item in sorted(base_path.iterdir()):
         if not item.is_dir():
+            continue
+
+        # Skip folders matching skip patterns
+        if should_skip_folder(item.name):
+            debug(f"Skipping folder: {item.name}")
             continue
 
         # Check if this folder contains .mkv files directly
@@ -955,23 +997,30 @@ def discover_disc_folders(base_path: Path) -> list[dict[str, Any]]:
         else:
             # Check subfolders (nested structure)
             for sub in sorted(item.iterdir()):
-                if sub.is_dir():
-                    sub_mkv = list(sub.glob("*.mkv"))
-                    if sub_mkv:
-                        parsed = parse_folder_name(sub.name)
-                        # Use parent folder name as series if sub doesn't have clear series
-                        if parsed["series"] == sub.name:
-                            parsed["series"] = item.name
-                        discovered.append(
-                            {
-                                "path": sub,
-                                "folder_path": sub,  # Alias for export_config_yaml compatibility
-                                "folder_name": sub.name,
-                                "parent_name": item.name,
-                                **parsed,
-                                "files": sorted(sub_mkv),
-                            }
-                        )
+                if not sub.is_dir():
+                    continue
+
+                # Skip folders matching skip patterns
+                if should_skip_folder(sub.name):
+                    debug(f"Skipping subfolder: {sub.name}")
+                    continue
+
+                sub_mkv = list(sub.glob("*.mkv"))
+                if sub_mkv:
+                    parsed = parse_folder_name(sub.name)
+                    # Use parent folder name as series if sub doesn't have clear series
+                    if parsed["series"] == sub.name:
+                        parsed["series"] = item.name
+                    discovered.append(
+                        {
+                            "path": sub,
+                            "folder_path": sub,  # Alias for export_config_yaml compatibility
+                            "folder_name": sub.name,
+                            "parent_name": item.name,
+                            **parsed,
+                            "files": sorted(sub_mkv),
+                        }
+                    )
 
     return discovered
 
@@ -986,6 +1035,69 @@ def extract_track_number(filename: str) -> int:
     if match:
         return int(match.group(1))
     return 0
+
+
+def group_discs_by_series(discovered: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group discs by normalized series name."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+
+    for d in discovered:
+        # Use parent folder name if available, otherwise parsed series name
+        series = d.get("parent_name", d["series"])
+
+        # Normalize: MushokuTensei -> Mushoku Tensei for grouping
+        normalized = normalize_search_query(series)
+
+        if normalized not in groups:
+            groups[normalized] = []
+        groups[normalized].append(d)
+
+    return groups
+
+
+def display_part_structure(
+    discs: list[dict[str, Any]], season_episode_counts: dict[int, int]
+) -> None:
+    """Display clear part-to-episode mapping."""
+    # Group by (season, part)
+    parts: dict[tuple[int, int | None], list[dict[str, Any]]] = {}
+    for d in discs:
+        key = (d.get("season", 1), d.get("part"))
+        if key not in parts:
+            parts[key] = []
+        parts[key].append(d)
+
+    print(f"\n{CYAN}📦 Part Structure:{RESET}")
+    running_ep = 1
+
+    for (season, part), part_discs in sorted(parts.items()):
+        part_files = sum(len(d["files"]) for d in part_discs)
+        disc_breakdown = " + ".join(f"D{d['disc']}({len(d['files'])})" for d in part_discs)
+
+        part_str = f"S{season}P{part}" if part else f"S{season}"
+        ep_range = f"E{running_ep:02d}-E{running_ep + part_files - 1:02d}"
+
+        print(f"  {part_str}: {disc_breakdown} = {part_files} files → {ep_range}")
+        running_ep += part_files
+
+    # Validate against TMDB
+    total_files = sum(len(d["files"]) for d in discs)
+    if season_episode_counts:
+        # Check if our parts match TMDB season count
+        detected_season = discs[0].get("season", 1)
+        tmdb_count = season_episode_counts.get(detected_season, 0)
+        if total_files == tmdb_count:
+            print(
+                f"  {GREEN}✓ Perfect match: {total_files} files = S{detected_season} ({tmdb_count} eps){RESET}"
+            )
+        elif total_files < tmdb_count:
+            print(
+                f"  {YELLOW}⚠️  {tmdb_count - total_files} episodes missing from TMDB S{detected_season}{RESET}"
+            )
+        elif total_files > tmdb_count:
+            print(
+                f"  {YELLOW}⚠️  {total_files - tmdb_count} extra files vs TMDB S{detected_season} ({tmdb_count} eps){RESET}"
+            )
 
 
 # ─────────────────────────── Interactive Mode ───────────────────────────
@@ -1166,6 +1278,39 @@ def build_btn_filename(
     return f"{base}-{group}.mkv"
 
 
+def build_btn_season_folder(
+    series_slug: str,
+    season: int,
+    metadata: dict[str, Any],
+    group: str = "NOGROUP",
+) -> str:
+    """
+    Build BTN-style season folder name.
+    Format: Series.Name.SXX.Resolution.Source[.Remux].Audio.Codec-Group
+
+    Examples:
+        Yu.Yu.Hakusho.S01.1080p.BluRay.Remux.TrueHD5.1.H.264-H2OKing
+        Breaking.Bad.S01.720p.BluRay.DD5.1.H.264-H2OKing
+    """
+    resolution = metadata.get("resolution", "1080p")
+    source = metadata.get("source", "BluRay")
+    remux = metadata.get("remux", True)
+
+    # Audio - BTN format: codec + channels, no space
+    audio = metadata.get("audio", "FLAC 2.0")
+    audio_btn = audio.replace(" ", "")
+
+    # Codec - just the codec name, no bit depth for BTN
+    codec = metadata.get("codec", "H.264 8bit")
+    codec_btn = re.sub(r"\s*\d+bit$", "", codec)
+
+    folder_name = f"{series_slug}.S{season:02d}.{resolution}.{source}"
+    if remux:
+        folder_name += ".Remux"
+    folder_name += f".{audio_btn}.{codec_btn}-{group}"
+    return folder_name
+
+
 def build_bracket_block(
     metadata: dict,
     group: str = "NOGROUP",
@@ -1213,6 +1358,11 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r'[<>:"/\\|?*]', "", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name
+
+
+def strip_year_suffix(title: str) -> str:
+    """Remove trailing year like '(2021)' from a title."""
+    return re.sub(r"\s*\(\d{4}\)\s*$", "", title).strip()
 
 
 def slugify_title(title: str) -> str:
@@ -1981,9 +2131,7 @@ def process_disc_interactive(
     print(f"  Detected languages: {'+'.join(detected_langs) if detected_langs else 'none'}")
 
     # Build series slug for BTN format (dotted, no year)
-    # Extract just the series name without year for slug
-    series_name_only = re.sub(r"\s*\(\d{4}\)\s*$", "", series_title).strip()
-    series_slug = slugify_title(series_name_only)
+    series_slug = slugify_title(strip_year_suffix(series_title))
 
     count = 0
     warnings_found = []
@@ -2125,13 +2273,8 @@ def run_auto_discovery(
     for d in discovered:
         print(f"  - {d['folder_name']} ({len(d['files'])} files)")
 
-    # Group by series
-    series_groups: dict[str, list[dict]] = {}
-    for d in discovered:
-        series = d.get("parent_name", d["series"])
-        if series not in series_groups:
-            series_groups[series] = []
-        series_groups[series].append(d)
+    # Group by series using normalized names
+    series_groups = group_discs_by_series(discovered)
 
     print(f"\nGrouped into {len(series_groups)} series:")
     for series_name, discs in series_groups.items():
@@ -2204,6 +2347,10 @@ def run_auto_discovery(
             print(
                 f"  Disc {disc['disc']}: {disc['folder_name']} ({len(disc['files'])} files){info_str}"
             )
+
+        # Show part structure with episode mapping (if parts detected)
+        if has_explicit_parts:
+            display_part_structure(discs, season_episode_counts)
 
         # Show detected structure
         if has_explicit_seasons or has_explicit_parts:
@@ -2496,8 +2643,13 @@ def run_auto_discovery(
                     }
                 )
 
-            # Output directory
-            output_dir = output_base / sanitize_filename(full_title)
+            # Build BTN-style output directory
+            # Use first season from configs and detect metadata from sample file
+            first_season = disc_configs[0]["season"] if disc_configs else 1
+            series_slug = slugify_title(strip_year_suffix(full_title))
+            sample_meta = detect_sample_metadata(discs)
+            btn_folder = build_btn_season_folder(series_slug, first_season, sample_meta, group)
+            output_dir = output_base / btn_folder
 
             # Build and show pre-flight summary
             if auto_mode:
@@ -2655,8 +2807,11 @@ def run_auto_discovery(
                     abs_input = input(f"Absolute start number [{start_ep}]: ").strip()
                     abs_start = int(abs_input) if abs_input.isdigit() else start_ep
 
-            # Output directory
-            output_dir = output_base / sanitize_filename(full_title)
+            # Build BTN-style output directory
+            series_slug = slugify_title(strip_year_suffix(full_title))
+            sample_meta = detect_sample_metadata(discs)
+            btn_folder = build_btn_season_folder(series_slug, season, sample_meta, group)
+            output_dir = output_base / btn_folder
             print(f"\nOutput directory: {output_dir}")
 
             # Process each disc - track running episode count
