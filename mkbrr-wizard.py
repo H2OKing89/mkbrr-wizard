@@ -1,490 +1,629 @@
 #!/usr/bin/env python3
 """
-Interactive wrapper for mkbrr (dockerised).
+Interactive wrapper for mkbrr (Docker OR native), driven by config.yaml.
 
-Supported operations:
-- create : build .torrent files from local content using presets.yaml
-- inspect: inspect .torrent metadata and file structure
-- check  : verify local files against a .torrent for data integrity
+Key points:
+- runtime: auto|docker|native
+- docker_support: true/false (also tolerates "ture")
+- chown: true/false
+- Accepts either /mnt/... or /data/... paths (maps depending on runtime)
+- Always passes --preset-file
+- Avoids mkbrr output flag mismatch by using:
+    - native: cwd = host_output_dir
+    - docker : -w  = container_output_dir
 """
 
+from __future__ import annotations
+
+import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-import yaml
-
-# ---------------------------------------------------------------------------
-# CONFIG: adjust these if your paths ever change
-# ---------------------------------------------------------------------------
-
-# Host → container mapping for /data
-HOST_DATA_ROOT = "/mnt/user/data"
-CONTAINER_DATA_ROOT = "/data"
-
-# Host path for torrent file output
-HOST_OUTPUT_DIR = "/mnt/user/data/downloads/torrents/torrentfiles"
-# mkbrr will write torrent files here (inside the container)
-CONTAINER_OUTPUT_DIR = "/torrentfiles"
-
-# Target ownership for .torrent files (Unraid's nobody:users)
-TARGET_UID = 99
-TARGET_GID = 100
-
-# Host path for mkbrr config
-HOST_CONFIG_DIR = "/mnt/cache/appdata/mkbrr"
-# Container path for mkbrr config
-CONTAINER_CONFIG_DIR = "/root/.config/mkbrr"
-
-# The mkbrr image
-IMAGE = "ghcr.io/autobrr/mkbrr"
-
-# Path to mkbrr presets.yaml on the host
-PRESETS_YAML_PATH = os.path.join(HOST_CONFIG_DIR, "presets.yaml")
+try:
+    import yaml
+except ImportError:
+    print("❌ PyYAML is not installed. Install it with:\n   pip install pyyaml")
+    raise SystemExit(1)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# ----------------------------
+# Config + parsing
+# ----------------------------
 
 
-def host_to_container_path(path: str) -> str:
-    """Convert a host path under /mnt/user/data to the container's /data path.
+def _coerce_bool(v: Any, default: bool) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "ture", "yes", "y", "1", "on", "enabled"):
+            return True
+        if s in ("false", "no", "n", "0", "off", "disabled"):
+            return False
+    return default
 
-    If it's already a container-style path (/data/...), leave it alone.
-    Otherwise, return as-is and let mkbrr complain if it's wrong.
+
+def _expand_path(p: str) -> str:
     """
-    path = path.strip()
-
-    # Already a container path
-    if path.startswith(CONTAINER_DATA_ROOT + "/") or path == CONTAINER_DATA_ROOT:
-        return path
-
-    # Normalize to absolute
-    abs_path = os.path.abspath(path)
-
-    if abs_path.startswith(HOST_DATA_ROOT):
-        suffix = abs_path[len(HOST_DATA_ROOT) :]
-        return CONTAINER_DATA_ROOT + suffix
-
-    # Fallback: not under /mnt/user/data and not /data – pass through
-    return path
-
-
-def host_to_container_torrent_path(path: str) -> str:
+    Expand ~ and $VARS and return a normalized path string.
+    Note: Does NOT require the path to exist.
     """
-    Map a host .torrent path under HOST_OUTPUT_DIR to the container's /torrentfiles path.
+    p = (p or "").strip()
+    if not p:
+        return p
+    p = os.path.expandvars(p)
+    return str(Path(p).expanduser())
 
-    If it's already a container-style path (/torrentfiles/...), leave it alone.
-    Otherwise, return as-is and let mkbrr complain if it's wrong.
+
+def _clean_user_path(s: str) -> str:
     """
-    path = path.strip()
-
-    # Already container path
-    if path.startswith(CONTAINER_OUTPUT_DIR + "/") or path == CONTAINER_OUTPUT_DIR:
-        return path
-
-    abs_path = os.path.abspath(path)
-
-    if abs_path.startswith(HOST_OUTPUT_DIR):
-        suffix = abs_path[len(HOST_OUTPUT_DIR) :]
-        return CONTAINER_OUTPUT_DIR + suffix
-
-    # Fallback: unknown location, pass through
-    return path
-
-
-def fix_torrent_permissions(root_dir: str = HOST_OUTPUT_DIR) -> None:
+    Clean up user input from interactive prompts.
+    - trims whitespace
+    - strips one pair of matching surrounding quotes ('...' or "...")
+    - expands ~ and $VARS
     """
-    Recursively chown all .torrent files under root_dir to TARGET_UID:TARGET_GID.
-    Safe to run as root after mkbrr creates torrents.
-    """
-    if not os.path.isdir(root_dir):
-        print(f"⚠️  Torrent directory does not exist: {root_dir}")
+    s = (s or "").strip()
+    if not s:
+        return s
+
+    # Strip one layer of matching surrounding quotes
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1].strip()
+
+    # Expand ~ and env vars (nice for Linux habits)
+    s = _expand_path(s)
+
+    return s
+
+
+@dataclass(frozen=True)
+class PathsCfg:
+    host_data_root: str
+    container_data_root: str
+    host_output_dir: str
+    container_output_dir: str
+    host_config_dir: str
+    container_config_dir: str
+
+
+@dataclass(frozen=True)
+class OwnershipCfg:
+    uid: int
+    gid: int
+
+
+@dataclass(frozen=True)
+class MkbrrCfg:
+    binary: str
+    image: str
+
+
+@dataclass(frozen=True)
+class AppCfg:
+    runtime: str  # auto|docker|native
+    docker_support: bool
+    chown: bool
+    docker_user: str | None
+
+    mkbrr: MkbrrCfg
+    paths: PathsCfg
+    ownership: OwnershipCfg
+
+    presets_yaml_host: str  # absolute host path to presets.yaml
+    presets_yaml_container: str  # container path to presets.yaml (docker runtime)
+
+
+def load_config(path: Path) -> AppCfg:
+    raw: dict[str, Any] = {}
+    if path.exists():
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("config.yaml root must be a mapping")
+    else:
+        raise FileNotFoundError(f"Config not found: {path}")
+
+    runtime = str(raw.get("runtime", "auto")).strip().lower()
+    if runtime not in ("auto", "docker", "native"):
+        raise ValueError("runtime must be one of: auto, docker, native")
+
+    docker_support = _coerce_bool(raw.get("docker_support", True), True)
+    chown = _coerce_bool(raw.get("chown", True), True)
+    docker_user = raw.get("docker_user")
+    docker_user = str(docker_user).strip() if docker_user else None
+
+    mkbrr_node = raw.get("mkbrr") or {}
+    mkbrr = MkbrrCfg(
+        binary=str(mkbrr_node.get("binary", "mkbrr")).strip(),
+        image=str(mkbrr_node.get("image", "ghcr.io/autobrr/mkbrr")).strip(),
+    )
+
+    paths_node = raw.get("paths") or {}
+    paths = PathsCfg(
+        host_data_root=_expand_path(
+            str(paths_node.get("host_data_root", "/mnt/user/data"))
+        ).rstrip("/"),
+        container_data_root=str(paths_node.get("container_data_root", "/data")).rstrip("/"),
+        host_output_dir=_expand_path(
+            str(paths_node.get("host_output_dir", "/mnt/user/data/downloads/torrents/torrentfiles"))
+        ).rstrip("/"),
+        container_output_dir=str(paths_node.get("container_output_dir", "/torrentfiles")).rstrip(
+            "/"
+        ),
+        host_config_dir=_expand_path(
+            str(paths_node.get("host_config_dir", "/mnt/cache/appdata/mkbrr"))
+        ).rstrip("/"),
+        container_config_dir=str(
+            paths_node.get("container_config_dir", "/root/.config/mkbrr")
+        ).rstrip("/"),
+    )
+
+    ownership_node = raw.get("ownership") or {}
+    ownership = OwnershipCfg(
+        uid=int(ownership_node.get("uid", 99)),
+        gid=int(ownership_node.get("gid", 100)),
+    )
+
+    presets_yaml_raw = str(raw.get("presets_yaml", "presets.yaml")).strip()
+
+    # Expand first (handles ~/ and $HOME/ etc)
+    presets_yaml_expanded = _expand_path(presets_yaml_raw)
+
+    # If it's still not absolute after expansion, treat it as relative to host_config_dir
+    if os.path.isabs(presets_yaml_expanded):
+        presets_host = presets_yaml_expanded
+    else:
+        presets_host = str(Path(paths.host_config_dir) / presets_yaml_raw)
+
+    # In docker, we expect presets.yaml to be available under container_config_dir
+    presets_container = str(Path(paths.container_config_dir) / Path(presets_host).name)
+
+    return AppCfg(
+        runtime=runtime,
+        docker_support=docker_support,
+        chown=chown,
+        docker_user=docker_user,
+        mkbrr=mkbrr,
+        paths=paths,
+        ownership=ownership,
+        presets_yaml_host=presets_host,
+        presets_yaml_container=presets_container,
+    )
+
+
+# ----------------------------
+# Runtime detection
+# ----------------------------
+
+
+def docker_available() -> bool:
+    try:
+        r = subprocess.run(["docker", "--version"], capture_output=True, text=True, check=False)
+        return r.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def native_available(binary: str) -> bool:
+    return shutil.which(binary) is not None
+
+
+def pick_runtime(cfg: AppCfg, forced: str | None) -> str:
+    if forced:
+        return forced
+
+    if cfg.runtime in ("docker", "native"):
+        return cfg.runtime
+
+    # auto
+    if cfg.docker_support and docker_available():
+        return "docker"
+    if native_available(cfg.mkbrr.binary):
+        return "native"
+    # last chance: if docker exists but docker_support false, still allow native only
+    raise RuntimeError(
+        "No usable runtime found.\n"
+        "- Docker not available (or docker_support=false)\n"
+        "- Native mkbrr not found on PATH\n"
+    )
+
+
+# ----------------------------
+# Path mapping (content + torrent files)
+# ----------------------------
+
+
+def map_content_path(cfg: AppCfg, runtime: str, raw: str) -> str:
+    raw = raw.strip()
+    if runtime == "docker":
+        # host -> container
+        if raw.startswith(cfg.paths.container_data_root + "/") or raw == cfg.paths.container_data_root:
+            return raw
+        abs_path = os.path.abspath(raw)
+        if abs_path.startswith(cfg.paths.host_data_root + "/") or abs_path == cfg.paths.host_data_root:
+            return cfg.paths.container_data_root + abs_path[len(cfg.paths.host_data_root) :]
+        return raw
+    else:
+        # container -> host
+        if raw.startswith(cfg.paths.host_data_root + "/") or raw == cfg.paths.host_data_root:
+            return raw
+        if raw.startswith(cfg.paths.container_data_root + "/") or raw == cfg.paths.container_data_root:
+            return cfg.paths.host_data_root + raw[len(cfg.paths.container_data_root) :]
+        return os.path.abspath(raw)
+
+
+def map_torrent_path(cfg: AppCfg, runtime: str, raw: str) -> str:
+    raw = raw.strip()
+    if runtime == "docker":
+        # host output -> container output
+        if raw.startswith(cfg.paths.container_output_dir + "/") or raw == cfg.paths.container_output_dir:
+            return raw
+        abs_path = os.path.abspath(raw)
+        if abs_path.startswith(cfg.paths.host_output_dir + "/") or abs_path == cfg.paths.host_output_dir:
+            return cfg.paths.container_output_dir + abs_path[len(cfg.paths.host_output_dir) :]
+        return raw
+    else:
+        # container output -> host output
+        if raw.startswith(cfg.paths.host_output_dir + "/") or raw == cfg.paths.host_output_dir:
+            return raw
+        if raw.startswith(cfg.paths.container_output_dir + "/") or raw == cfg.paths.container_output_dir:
+            return cfg.paths.host_output_dir + raw[len(cfg.paths.container_output_dir) :]
+        return os.path.abspath(raw)
+
+
+# ----------------------------
+# Docker command builder
+# ----------------------------
+
+
+def docker_run_base(cfg: AppCfg, workdir: str) -> list[str]:
+    cmd = ["docker", "run", "--rm"]
+
+    # Only add -it when interactive; cron/log files hate TTY
+    if sys.stdin.isatty():
+        cmd += ["-it"]
+
+    if cfg.docker_user:
+        cmd += ["--user", cfg.docker_user]
+
+    cmd += [
+        "-w",
+        workdir,
+        "-v",
+        f"{cfg.paths.host_data_root}:{cfg.paths.container_data_root}",
+        "-v",
+        f"{cfg.paths.host_output_dir}:{cfg.paths.container_output_dir}",
+        "-v",
+        f"{cfg.paths.host_config_dir}:{cfg.paths.container_config_dir}",
+        cfg.mkbrr.image,
+        "mkbrr",
+    ]
+    return cmd
+
+
+# ----------------------------
+# Permissions
+# ----------------------------
+
+
+def maybe_fix_torrent_permissions(cfg: AppCfg) -> None:
+    if not cfg.chown:
         return
 
-    print(f"🔐 Fixing ownership of .torrent files under {root_dir} ...")
+    outdir = cfg.paths.host_output_dir
+    if not os.path.isdir(outdir):
+        print(f"⚠️  Output dir does not exist: {outdir}")
+        return
 
-    for dirpath, _, filenames in os.walk(root_dir):
-        for name in filenames:
-            if not name.lower().endswith(".torrent"):
+    # Only try chown as root (Unraid root: yes; Ubuntu user: maybe no)
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        print("⚠️  chown=true but not running as root; skipping chown.")
+        return
+
+    uid, gid = cfg.ownership.uid, cfg.ownership.gid
+    changed = 0
+
+    for dirpath, _, files in os.walk(outdir):
+        for f in files:
+            if not f.lower().endswith(".torrent"):
                 continue
-
-            full_path = os.path.join(dirpath, name)
+            p = os.path.join(dirpath, f)
             try:
-                stat = os.stat(full_path)
-                if stat.st_uid != TARGET_UID or stat.st_gid != TARGET_GID:
-                    os.chown(full_path, TARGET_UID, TARGET_GID)
-                    print(f"  🔧 chown {TARGET_UID}:{TARGET_GID} -> {full_path}")
+                st = os.stat(p)
+                if st.st_uid != uid or st.st_gid != gid:
+                    os.chown(p, uid, gid)
+                    changed += 1
             except FileNotFoundError:
-                # File may have been removed between listing and chown
                 continue
             except PermissionError as e:
-                print(f"  ⚠️ Permission error on {full_path}: {e}")
+                print(f"  ⚠️ Permission error on {p}: {e}")
+
+    if changed:
+        print(f"🔐 chown fixed ownership on {changed} .torrent file(s).")
+    else:
+        print("🔐 ownership already correct (or nothing new to chown).")
 
 
-def load_presets_from_yaml(path: str = PRESETS_YAML_PATH) -> list[str]:
-    """Load mkbrr preset names from presets.yaml using PyYAML.
+# ----------------------------
+# Presets menu
+# ----------------------------
 
-    Expects structure like:
 
-        presets:
-          btn:
-            ...
-          mam:
-            ...
-
-    Returns a list of preset names, with "btn" first if present.
-    """
-    if not os.path.exists(path):
-        print(f"⚠️  presets.yaml not found at {path}, using fallback presets: ['btn', 'custom']")
+def load_presets(host_presets_yaml: str) -> list[str]:
+    p = Path(host_presets_yaml)
+    if not p.exists():
+        print(f"⚠️  presets.yaml not found at {host_presets_yaml}. Using fallback: ['btn', 'custom']")
         return ["btn", "custom"]
 
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except Exception as e:
-        print(f"⚠️  Failed to parse {path}: {e}. Using fallback presets: ['btn', 'custom']")
-        return ["btn", "custom"]
-
-    presets_node = data.get("presets") or {}
+    data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    presets_node = (data.get("presets") or {}) if isinstance(data, dict) else {}
 
     if not isinstance(presets_node, dict) or not presets_node:
-        print(f"⚠️  No valid 'presets' mapping in {path}, using fallback presets: ['btn', 'custom']")
         return ["btn", "custom"]
 
     presets = list(presets_node.keys())
-
-    # Prefer 'btn' first if present
     if "btn" in presets:
-        presets = ["btn"] + [p for p in presets if p != "btn"]
-
+        presets = ["btn"] + [x for x in presets if x != "btn"]
     return presets
 
 
-def pick_preset() -> str:
-    presets = load_presets_from_yaml()
+def pick_preset(cfg: AppCfg) -> str:
+    presets = load_presets(cfg.presets_yaml_host)
 
-    print(f"\n🎛  Preset selection (-P) (from {PRESETS_YAML_PATH}):")
-    for idx, p in enumerate(presets, start=1):
-        print(f"  [{idx}] {p}")
+    print(f"\n🎛  Preset selection (-P) (from {cfg.presets_yaml_host}):")
+    for i, p in enumerate(presets, 1):
+        print(f"  [{i}] {p}")
 
-    print("\nYou can:")
-    print("  - Choose by number")
-    print("  - Type a preset name directly")
-    print("  - Press Enter for the default [btn if available]")
-
-    choice = input(f"\nChoose preset [1-{len(presets)} or name]: ").strip()
-
-    # Numbered selection
+    choice = input(f"\nChoose preset [1-{len(presets)} or name, Enter=default]: ").strip()
     if choice.isdigit():
         idx = int(choice)
         if 1 <= idx <= len(presets):
             return presets[idx - 1]
-
-    # Direct string input (custom or existing)
     if choice:
         if choice not in presets:
-            print(f"⚠️  '{choice}' is not in presets.yaml, mkbrr may fail")
+            print(f"⚠️  '{choice}' not found in presets.yaml; mkbrr may fail.")
         return choice
-
-    # Default when just hitting Enter
-    if "btn" in presets:
-        return "btn"
-    return presets[0]
+    return "btn" if "btn" in presets else presets[0]
 
 
-def ask_path() -> str:
-    print("\n📂 Enter the path to the file or folder:")
-    print("   - You can paste a *host* path (e.g. /mnt/user/data/...)")
-    print("   - Or a *container* path (e.g. /data/downloads/...)")
-    raw = input("\nPath: ").strip()
-
-    if not raw:
-        print("❌ No path given, aborting.")
-        raise SystemExit(1)
-
-    container_path = host_to_container_path(raw)
-
-    # Best-effort check: if it's a host path, verify it exists
-    if raw.startswith("/mnt/"):
-        if not os.path.exists(raw):
-            print(f"⚠️  Warning: host path does not exist: {raw}")
-        else:
-            print(f"✅ Host path exists: {raw}")
-
-    print(f"🧩 Using container path inside mkbrr: {container_path}")
-    return container_path
-
-
-def ask_torrent_file() -> str:
-    """Ask for the .torrent file path (used by inspect/check)."""
-    print("\n📄 Enter the path to the .torrent file:")
-    print(f"   - Host path (e.g. {HOST_OUTPUT_DIR}/my-release.torrent)")
-    print(f"   - Or container path (e.g. {CONTAINER_OUTPUT_DIR}/my-release.torrent)")
-    raw = input("\nTorrent file path: ").strip()
-
-    if not raw:
-        print("❌ No path given, aborting.")
-        raise SystemExit(1)
-
-    container_path = host_to_container_torrent_path(raw)
-
-    # Best-effort existence check for host paths
-    if raw.startswith("/mnt/"):
-        if not os.path.exists(raw):
-            print(f"⚠️  Warning: host .torrent does not exist: {raw}")
-        else:
-            print(f"✅ Host .torrent exists: {raw}")
-
-    print(f"🧩 Using container path inside mkbrr: {container_path}")
-    return container_path
-
-
-def ask_verbose(mode: str = "inspect") -> bool:
-    """Ask if user wants verbose output (used by inspect/check)."""
-    if mode == "check":
-        prompt = "\n🔍 Verbose output? Show detailed verification info? [y/N]: "
-    else:
-        prompt = "\n🔍 Verbose output? Show all metadata fields? [y/N]: "
-    ans = input(prompt).strip().lower()
-    return ans in ("y", "yes", "v", "verbose")
-
-
-def ask_quiet() -> bool:
-    """Ask if user wants quiet mode (only final status/percent)."""
-    ans = input("\n🤫 Quiet mode? Only final status/percent on success. [y/N]: ").strip().lower()
-    return ans in ("y", "yes", "q", "quiet")
-
-
-def ask_workers() -> int | None:
-    """Ask for number of workers (or None for automatic)."""
-    raw = input("\n⚙️  Workers (leave empty for automatic): ").strip()
-    if not raw:
-        return None
-    try:
-        value = int(raw)
-        if value <= 0:
-            raise ValueError
-        return value
-    except ValueError:
-        print("⚠️  Invalid workers value, ignoring.")
-        return None
-
-
-def _docker_base() -> list[str]:
-    """Return the common docker run prefix used by all mkbrr commands."""
-    return [
-        "docker",
-        "run",
-        "--rm",
-        "-it",
-        "-w",
-        CONTAINER_CONFIG_DIR,
-        "-v",
-        f"{HOST_DATA_ROOT}:{CONTAINER_DATA_ROOT}",
-        "-v",
-        f"{HOST_OUTPUT_DIR}:{CONTAINER_OUTPUT_DIR}",
-        "-v",
-        f"{HOST_CONFIG_DIR}:{CONTAINER_CONFIG_DIR}",
-        IMAGE,
-    ]
-
-
-def build_command(container_path: str, preset: str) -> list[str]:
-    """Build the full docker run command as a list of args."""
-    return _docker_base() + [
-        "mkbrr",
-        "create",
-        container_path,
-        "-P",
-        preset,
-        "--output-dir",
-        CONTAINER_OUTPUT_DIR,
-    ]
-
-
-def build_inspect_command(torrent_container_path: str, verbose: bool) -> list[str]:
-    """Build the docker run command for `mkbrr inspect`."""
-    cmd = _docker_base() + [
-        "mkbrr",
-        "inspect",
-        torrent_container_path,
-    ]
-    if verbose:
-        cmd.append("-v")  # mkbrr's --verbose / -v flag
-    return cmd
-
-
-def build_check_command(
-    torrent_container_path: str,
-    content_container_path: str,
-    verbose: bool,
-    quiet: bool,
-    workers: int | None,
-) -> list[str]:
-    """Build the docker run command for `mkbrr check`."""
-    cmd = _docker_base() + [
-        "mkbrr",
-        "check",
-        torrent_container_path,
-        content_container_path,
-    ]
-
-    # Flags come after positional args as per mkbrr docs
-    if verbose:
-        cmd.append("-v")
-    if quiet:
-        cmd.append("--quiet")
-    if workers is not None:
-        cmd.extend(["--workers", str(workers)])
-
-    return cmd
+# ----------------------------
+# Prompts
+# ----------------------------
 
 
 def choose_action() -> str:
-    """Ask the user what they want to do with mkbrr."""
     print("\n🧰 What do you want to do?")
     print("  [1] Create a torrent from a file/folder   (mkbrr create)")
     print("  [2] Inspect an existing .torrent file     (mkbrr inspect)")
     print("  [3] Check data against a .torrent file    (mkbrr check)")
     print("  [q] Quit")
 
-    choice = input("\nChoose an option [1/2/3/q]: ").strip().lower()
-
-    if choice in ("2", "i", "inspect"):
+    choice = input("\nChoose [1/2/3/q]: ").strip().lower()
+    if choice in ("2", "inspect", "i"):
         return "inspect"
-    if choice in ("3", "c", "check"):
+    if choice in ("3", "check", "c"):
         return "check"
     if choice in ("q", "quit", "exit"):
-        print("👋 Bye.")
         raise SystemExit(0)
-
-    # Default to 'create' for anything else (including empty)
     return "create"
 
 
-def check_docker_available() -> bool:
-    """Check if Docker is available on the system."""
+def ask_path(prompt: str) -> str:
+    raw = _clean_user_path(input(prompt))
+    if not raw:
+        raise SystemExit("❌ No path provided.")
+    return raw
+
+
+def ask_yes_no(prompt: str, default_no: bool = True) -> bool:
+    s = input(prompt).strip().lower()
+    if not s:
+        return not default_no
+    return s in ("y", "yes")
+
+
+def ask_verbose(mode: str) -> bool:
+    if mode == "check":
+        return ask_yes_no("\n🔍 Verbose output for check? [y/N]: ", default_no=True)
+    return ask_yes_no("\n🔍 Verbose output for inspect? [y/N]: ", default_no=True)
+
+
+def ask_quiet() -> bool:
+    return ask_yes_no("\n🤫 Quiet mode for check? [y/N]: ", default_no=True)
+
+
+def ask_workers() -> int | None:
+    s = input("\n⚙️  Workers (Enter=auto): ").strip()
+    if not s:
+        return None
     try:
-        result = subprocess.run(
-            ["docker", "--version"],
-            capture_output=True,
-            check=False,
-        )
-        return result.returncode == 0
-    except FileNotFoundError:
-        return False
+        v = int(s)
+        return v if v > 0 else None
+    except ValueError:
+        print("⚠️  Invalid workers; using auto.")
+        return None
+
+
+def confirm_cmd(cmd: list[str], cwd: str | None = None) -> bool:
+    print("\n🚀 About to run:")
+    if cwd:
+        print(f"   (cwd: {cwd})")
+    print("   " + " ".join(shlex.quote(x) for x in cmd))
+    return ask_yes_no("\nProceed? [Y/n]: ", default_no=False)
+
+
+# ----------------------------
+# Main
+# ----------------------------
+
+
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--config", default="config.yaml", help="Path to config.yaml (default: ./config.yaml)"
+    )
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--docker", action="store_true", help="Force docker runtime")
+    g.add_argument("--native", action="store_true", help="Force native runtime")
+    return ap.parse_args()
+
+
+def sanity_checks(cfg: AppCfg) -> None:
+    Path(cfg.paths.host_output_dir).mkdir(parents=True, exist_ok=True)
+
+    # presets must exist on host for menu
+    if not Path(cfg.presets_yaml_host).exists():
+        print(f"⚠️  presets.yaml not found at: {cfg.presets_yaml_host}")
+        print("    The preset menu will fall back to ['btn', 'custom'].")
+
+    # Docker runtime requires config dir mount to include presets.yaml
+    if cfg.docker_support and Path(cfg.paths.host_config_dir).exists():
+        # friendly reminder only
+        pass
 
 
 def main() -> None:
+    args = parse_args()
+    cfg = load_config(Path(args.config))
+    sanity_checks(cfg)
+
+    forced = "docker" if args.docker else "native" if args.native else None
+    runtime = pick_runtime(cfg, forced)
+
     print("==========================================")
-    print("  🧙 mkbrr Wizard – Torrent Creator Assist")
+    print("  🧙 mkbrr Wizard – Docker / Native")
     print("==========================================")
+    print(f"Runtime       : {runtime}")
+    print(f"Docker support: {cfg.docker_support} (docker_user={cfg.docker_user or 'none'})")
+    print(f"Presets (host): {cfg.presets_yaml_host}")
+    print(f"Output (host) : {cfg.paths.host_output_dir}")
+    print(f"chown         : {cfg.chown} (uid:gid {cfg.ownership.uid}:{cfg.ownership.gid})")
 
     try:
-        # Check Docker is available
-        if not check_docker_available():
-            print("❌ Docker is not available")
-            sys.exit(1)
-
         while True:
             action = choose_action()
 
             if action == "create":
-                preset = pick_preset()
-                print(f"\n🎚  Selected preset: {preset}")
+                preset = pick_preset(cfg)
+                raw = ask_path("\n📂 Content path (/mnt/... or /data/...): ")
+                content_path = map_content_path(cfg, runtime, raw)
 
-                container_path = ask_path()
+                # Check existence for native mode before calling mkbrr
+                if runtime == "native" and not os.path.exists(content_path):
+                    print(f"❌ Content path does not exist: {content_path}")
+                    print("   Tip: don't wrap the path in quotes (or let the wizard strip them).")
+                    continue
 
-                cmd = build_command(container_path, preset)
-
-                print("\n🚀 About to run:")
-                print("   " + " ".join(shlex.quote(part) for part in cmd))
-                confirm = input("\nProceed? [Y/n]: ").strip().lower()
-                if confirm not in ("", "y", "yes"):
-                    print("👉 Cancelled. Nothing was run.")
+                # Build command.
+                # We avoid output flags entirely and rely on cwd / -w output_dir.
+                if runtime == "docker":
+                    cmd = docker_run_base(cfg, cfg.paths.container_output_dir) + [
+                        "create",
+                        content_path,
+                        "-P",
+                        preset,
+                        "--preset-file",
+                        cfg.presets_yaml_container,
+                    ]
+                    cwd = None
                 else:
-                    # Run mkbrr create
-                    print("\n🛠  Running mkbrr create... (Ctrl+C to abort)")
-                    result = subprocess.run(cmd, check=False)
+                    cmd = [
+                        cfg.mkbrr.binary,
+                        "create",
+                        content_path,
+                        "-P",
+                        preset,
+                        "--preset-file",
+                        cfg.presets_yaml_host,
+                    ]
+                    cwd = cfg.paths.host_output_dir
 
-                    if result.returncode == 0:
+                if confirm_cmd(cmd, cwd=cwd):
+                    r = subprocess.run(cmd, cwd=cwd, check=False)
+                    if r.returncode == 0:
                         print("\n✅ mkbrr create finished.")
-                        # Post-process permissions on created .torrent files
-                        fix_torrent_permissions()
+                        maybe_fix_torrent_permissions(cfg)
                     else:
-                        print(f"\n❌ mkbrr exited with code {result.returncode}")
+                        print(f"\n❌ mkbrr exited with code {r.returncode}")
 
             elif action == "inspect":
-                torrent_path = ask_torrent_file()
-                verbose = ask_verbose(mode="inspect")
+                raw = ask_path(
+                    f"\n📄 Torrent file path (host {cfg.paths.host_output_dir}/..."
+                    f" or container {cfg.paths.container_output_dir}/...): "
+                )
+                torrent_path = map_torrent_path(cfg, runtime, raw)
+                verbose = ask_verbose("inspect")
 
-                cmd = build_inspect_command(torrent_path, verbose)
-
-                print("\n🚀 About to run:")
-                print("   " + " ".join(shlex.quote(part) for part in cmd))
-                confirm = input("\nProceed? [Y/n]: ").strip().lower()
-                if confirm not in ("", "y", "yes"):
-                    print("👉 Cancelled. Nothing was run.")
+                if runtime == "docker":
+                    cmd = docker_run_base(cfg, cfg.paths.container_config_dir) + ["inspect", torrent_path]
                 else:
-                    # Run mkbrr inspect
-                    print("\n🛠  Running mkbrr inspect... (Ctrl+C to abort)")
-                    result = subprocess.run(cmd, check=False)
+                    cmd = [cfg.mkbrr.binary, "inspect", torrent_path]
 
-                    if result.returncode == 0:
-                        print("\n✅ mkbrr inspect finished.")
-                    else:
-                        print(f"\n❌ mkbrr exited with code {result.returncode}")
+                if verbose:
+                    cmd.append("-v")
+
+                if confirm_cmd(cmd):
+                    r = subprocess.run(cmd, check=False)
+                    print(
+                        "\n✅ done." if r.returncode == 0 else f"\n❌ mkbrr exited with code {r.returncode}"
+                    )
 
             elif action == "check":
-                torrent_path = ask_torrent_file()
-                print("\n📂 Now enter the path to the local content to verify.")
-                content_path = ask_path()
+                raw_t = ask_path(
+                    f"\n📄 Torrent file path (host {cfg.paths.host_output_dir}/..."
+                    f" or container {cfg.paths.container_output_dir}/...): "
+                )
+                raw_c = ask_path("\n📂 Content path to verify (/mnt/... or /data/...): ")
 
-                verbose = ask_verbose(mode="check")
+                torrent_path = map_torrent_path(cfg, runtime, raw_t)
+                content_path = map_content_path(cfg, runtime, raw_c)
+
+                verbose = ask_verbose("check")
                 quiet = ask_quiet()
                 workers = ask_workers()
 
                 if quiet and verbose:
-                    print("⚠️  Both verbose and quiet selected; preferring quiet mode.")
+                    print("⚠️  Both verbose and quiet selected; preferring quiet.")
                     verbose = False
 
-                cmd = build_check_command(
-                    torrent_container_path=torrent_path,
-                    content_container_path=content_path,
-                    verbose=verbose,
-                    quiet=quiet,
-                    workers=workers,
-                )
-
-                print("\n🚀 About to run:")
-                print("   " + " ".join(shlex.quote(part) for part in cmd))
-                confirm = input("\nProceed? [Y/n]: ").strip().lower()
-                if confirm not in ("", "y", "yes"):
-                    print("👉 Cancelled. Nothing was run.")
+                if runtime == "docker":
+                    cmd = docker_run_base(cfg, cfg.paths.container_config_dir) + [
+                        "check",
+                        torrent_path,
+                        content_path,
+                    ]
                 else:
-                    # Run mkbrr check
-                    print("\n🛠  Running mkbrr check... (Ctrl+C to abort)")
-                    result = subprocess.run(cmd, check=False)
+                    cmd = [cfg.mkbrr.binary, "check", torrent_path, content_path]
 
-                    if result.returncode == 0:
-                        print("\n✅ mkbrr check finished (data verified).")
-                    else:
-                        print(f"\n❌ mkbrr exited with code {result.returncode}")
+                if verbose:
+                    cmd.append("-v")
+                if quiet:
+                    cmd.append("--quiet")
+                if workers:
+                    cmd += ["--workers", str(workers)]
 
-            # Ask if user wants to do another operation
+                if confirm_cmd(cmd):
+                    r = subprocess.run(cmd, check=False)
+                    print(
+                        "\n✅ data verified."
+                        if r.returncode == 0
+                        else f"\n❌ mkbrr exited with code {r.returncode}"
+                    )
+
             again = input("\n🔄 Do another operation? [y/N]: ").strip().lower()
             if again not in ("y", "yes"):
                 print("👋 Bye.")
                 break
 
-    except KeyboardInterrupt:
-        print("\n⏹  Interrupted by user.")
-    except Exception as e:
-        print(f"\n💥 Error: {e}")
-        raise
+    except (KeyboardInterrupt, EOFError):
+        print("\n⏹  Interrupted. Bye.")
 
 
 if __name__ == "__main__":
