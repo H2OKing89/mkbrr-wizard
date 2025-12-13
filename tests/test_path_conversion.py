@@ -45,22 +45,15 @@ class TestMapContentPath:
     def test_docker_host_to_container(self, mkbrr_wizard: ModuleType, sample_cfg: Any) -> None:
         """Host paths in docker mode should be converted to container paths."""
         assert (
-            mkbrr_wizard.map_content_path(
-                sample_cfg, "docker", "/mnt/user/data/downloads/file.mkv"
-            )
+            mkbrr_wizard.map_content_path(sample_cfg, "docker", "/mnt/user/data/downloads/file.mkv")
             == "/data/downloads/file.mkv"
         )
-        assert (
-            mkbrr_wizard.map_content_path(sample_cfg, "docker", "/mnt/user/data")
-            == "/data"
-        )
+        assert mkbrr_wizard.map_content_path(sample_cfg, "docker", "/mnt/user/data") == "/data"
 
     def test_native_already_host_path(self, mkbrr_wizard: ModuleType, sample_cfg: Any) -> None:
         """Host paths in native mode should pass through unchanged."""
         assert (
-            mkbrr_wizard.map_content_path(
-                sample_cfg, "native", "/mnt/user/data/downloads/file.mkv"
-            )
+            mkbrr_wizard.map_content_path(sample_cfg, "native", "/mnt/user/data/downloads/file.mkv")
             == "/mnt/user/data/downloads/file.mkv"
         )
 
