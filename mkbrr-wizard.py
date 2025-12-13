@@ -99,10 +99,7 @@ def _coerce_bool(v: Any, default: bool) -> bool:
 
 
 def _expand_path(p: str) -> str:
-    """
-    Expand ~ and $VARS and return a normalized path string.
-    Note: Does NOT require the path to exist.
-    """
+    """Expand ~ and $VARS and return a normalized path string (doesn't require existence)."""
     p = (p or "").strip()
     if not p:
         return p
@@ -112,7 +109,7 @@ def _expand_path(p: str) -> str:
 
 def _clean_user_path(s: str) -> str:
     """
-    Clean up user input from interactive prompts.
+    Clean up user input from interactive prompts:
     - trims whitespace
     - strips one pair of matching surrounding quotes ('...' or "...")
     - expands ~ and $VARS
@@ -121,14 +118,10 @@ def _clean_user_path(s: str) -> str:
     if not s:
         return s
 
-    # Strip one layer of matching surrounding quotes
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
         s = s[1:-1].strip()
 
-    # Expand ~ and env vars (nice for Linux habits)
-    s = _expand_path(s)
-
-    return s
+    return _expand_path(s)
 
 
 @dataclass(frozen=True)
