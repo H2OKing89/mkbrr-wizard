@@ -23,7 +23,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 try:
     import yaml
@@ -124,9 +124,13 @@ class AppCfg:
 def load_config(path: Path) -> AppCfg:
     raw: dict[str, Any] = {}
     if path.exists():
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        if not isinstance(raw, dict):
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if loaded is None:
+            raw = {}
+        elif not isinstance(loaded, dict):
             raise ValueError("config.yaml root must be a mapping")
+        else:
+            raw = cast(dict[str, Any], loaded)
     else:
         raise FileNotFoundError(f"Config not found: {path}")
 
@@ -139,13 +143,13 @@ def load_config(path: Path) -> AppCfg:
     docker_user = raw.get("docker_user")
     docker_user = str(docker_user).strip() if docker_user else None
 
-    mkbrr_node = raw.get("mkbrr") or {}
+    mkbrr_node: dict[str, Any] = cast(dict[str, Any], raw.get("mkbrr") or {})
     mkbrr = MkbrrCfg(
         binary=str(mkbrr_node.get("binary", "mkbrr")).strip(),
         image=str(mkbrr_node.get("image", "ghcr.io/autobrr/mkbrr")).strip(),
     )
 
-    paths_node = raw.get("paths") or {}
+    paths_node: dict[str, Any] = cast(dict[str, Any], raw.get("paths") or {})
     paths = PathsCfg(
         host_data_root=_expand_path(
             str(paths_node.get("host_data_root", "/mnt/user/data"))
@@ -165,7 +169,7 @@ def load_config(path: Path) -> AppCfg:
         ).rstrip("/"),
     )
 
-    ownership_node = raw.get("ownership") or {}
+    ownership_node: dict[str, Any] = cast(dict[str, Any], raw.get("ownership") or {})
     ownership = OwnershipCfg(
         uid=int(ownership_node.get("uid", 99)),
         gid=int(ownership_node.get("gid", 100)),
@@ -362,13 +366,14 @@ def load_presets(host_presets_yaml: str) -> list[str]:
         print(f"⚠️  presets.yaml not found at {host_presets_yaml}. Using fallback: ['btn', 'custom']")
         return ["btn", "custom"]
 
-    data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    presets_node = (data.get("presets") or {}) if isinstance(data, dict) else {}
+    loaded = yaml.safe_load(p.read_text(encoding="utf-8"))
+    data: dict[str, Any] = cast(dict[str, Any], loaded) if isinstance(loaded, dict) else {}
+    presets_node: dict[str, Any] = cast(dict[str, Any], data.get("presets") or {})
 
-    if not isinstance(presets_node, dict) or not presets_node:
+    if not presets_node:
         return ["btn", "custom"]
 
-    presets = list(presets_node.keys())
+    presets: list[str] = [str(k) for k in presets_node.keys()]
     if "btn" in presets:
         presets = ["btn"] + [x for x in presets if x != "btn"]
     return presets
