@@ -85,3 +85,6 @@ dmypy.json
 # Local configuration (if any)
 *.local.yaml
 *.local.yml
+
+# User editable configuration (do not track)
+config.yaml
