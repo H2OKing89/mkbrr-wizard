@@ -288,17 +288,26 @@ def map_content_path(cfg: AppCfg, runtime: str, raw: str) -> str:
     raw = raw.strip()
     if runtime == "docker":
         # host -> container
-        if raw.startswith(cfg.paths.container_data_root + "/") or raw == cfg.paths.container_data_root:
+        if (
+            raw.startswith(cfg.paths.container_data_root + "/")
+            or raw == cfg.paths.container_data_root
+        ):
             return raw
         abs_path = os.path.abspath(raw)
-        if abs_path.startswith(cfg.paths.host_data_root + "/") or abs_path == cfg.paths.host_data_root:
+        if (
+            abs_path.startswith(cfg.paths.host_data_root + "/")
+            or abs_path == cfg.paths.host_data_root
+        ):
             return cfg.paths.container_data_root + abs_path[len(cfg.paths.host_data_root) :]
         return raw
     else:
         # container -> host
         if raw.startswith(cfg.paths.host_data_root + "/") or raw == cfg.paths.host_data_root:
             return raw
-        if raw.startswith(cfg.paths.container_data_root + "/") or raw == cfg.paths.container_data_root:
+        if (
+            raw.startswith(cfg.paths.container_data_root + "/")
+            or raw == cfg.paths.container_data_root
+        ):
             return cfg.paths.host_data_root + raw[len(cfg.paths.container_data_root) :]
         return os.path.abspath(raw)
 
@@ -307,17 +316,26 @@ def map_torrent_path(cfg: AppCfg, runtime: str, raw: str) -> str:
     raw = raw.strip()
     if runtime == "docker":
         # host output -> container output
-        if raw.startswith(cfg.paths.container_output_dir + "/") or raw == cfg.paths.container_output_dir:
+        if (
+            raw.startswith(cfg.paths.container_output_dir + "/")
+            or raw == cfg.paths.container_output_dir
+        ):
             return raw
         abs_path = os.path.abspath(raw)
-        if abs_path.startswith(cfg.paths.host_output_dir + "/") or abs_path == cfg.paths.host_output_dir:
+        if (
+            abs_path.startswith(cfg.paths.host_output_dir + "/")
+            or abs_path == cfg.paths.host_output_dir
+        ):
             return cfg.paths.container_output_dir + abs_path[len(cfg.paths.host_output_dir) :]
         return raw
     else:
         # container output -> host output
         if raw.startswith(cfg.paths.host_output_dir + "/") or raw == cfg.paths.host_output_dir:
             return raw
-        if raw.startswith(cfg.paths.container_output_dir + "/") or raw == cfg.paths.container_output_dir:
+        if (
+            raw.startswith(cfg.paths.container_output_dir + "/")
+            or raw == cfg.paths.container_output_dir
+        ):
             return cfg.paths.host_output_dir + raw[len(cfg.paths.container_output_dir) :]
         return os.path.abspath(raw)
 
