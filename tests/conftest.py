@@ -5,6 +5,7 @@ Pytest configuration and fixtures for mkbrr-wizard tests.
 import importlib.util
 import os
 import sys
+from types import ModuleType
 
 import pytest
 
@@ -12,7 +13,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def _load_mkbrr_wizard():
+def _load_mkbrr_wizard() -> ModuleType:
     """Load the mkbrr-wizard module dynamically (handles hyphen in filename)."""
     module_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mkbrr-wizard.py"
@@ -21,6 +22,8 @@ def _load_mkbrr_wizard():
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load module from {module_path}")
     module = importlib.util.module_from_spec(spec)
+    # Register in sys.modules BEFORE exec_module to fix dataclass resolution
+    sys.modules["mkbrr_wizard"] = module
     spec.loader.exec_module(module)
     return module
 
@@ -35,18 +38,15 @@ def mkbrr_wizard():
     return _module
 
 
-# Also expose key functions directly for convenience
-host_to_container_path = _module.host_to_container_path
-host_to_container_torrent_path = _module.host_to_container_torrent_path
-load_presets_from_yaml = _module.load_presets_from_yaml
-build_command = _module.build_command
-build_inspect_command = _module.build_inspect_command
-build_check_command = _module.build_check_command
-_docker_base = _module._docker_base
+# Expose key functions for convenience (updated to new API)
+map_content_path = _module.map_content_path
+map_torrent_path = _module.map_torrent_path
+load_config = _module.load_config
+load_presets = _module.load_presets
+docker_run_base = _module.docker_run_base
 
-# Constants
-HOST_DATA_ROOT = _module.HOST_DATA_ROOT
-CONTAINER_DATA_ROOT = _module.CONTAINER_DATA_ROOT
-HOST_OUTPUT_DIR = _module.HOST_OUTPUT_DIR
-CONTAINER_OUTPUT_DIR = _module.CONTAINER_OUTPUT_DIR
-IMAGE = _module.IMAGE
+# Dataclasses
+AppCfg = _module.AppCfg
+PathsCfg = _module.PathsCfg
+OwnershipCfg = _module.OwnershipCfg
+MkbrrCfg = _module.MkbrrCfg
