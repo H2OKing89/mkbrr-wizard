@@ -2,6 +2,8 @@
 """
 Interactive wrapper for mkbrr (Docker OR native), driven by config.yaml.
 
+Rich UI edition ✨
+
 Key points:
 - runtime: auto|docker|native
 - docker_support: true/false (also tolerates "ture")
@@ -30,6 +32,51 @@ try:
 except ImportError:
     print("❌ PyYAML is not installed. Install it with:\n   pip install pyyaml")
     raise SystemExit(1)
+
+try:
+    from rich import box
+    from rich.console import Console, Group
+    from rich.panel import Panel
+    from rich.prompt import Confirm, Prompt
+    from rich.syntax import Syntax
+    from rich.table import Table
+    from rich.text import Text
+    from rich.theme import Theme
+    from rich.traceback import install as install_rich_traceback
+
+    install_rich_traceback(show_locals=False)
+except ImportError:
+    print("❌ rich is not installed. Install it with:\n   pip install rich")
+    raise SystemExit(1)
+
+try:
+    from prompt_toolkit.history import InMemoryHistory
+
+    _content_history: InMemoryHistory | None = InMemoryHistory()
+    _torrent_history: InMemoryHistory | None = InMemoryHistory()
+    _has_prompt_toolkit = True
+except ImportError:
+    # prompt_toolkit is optional; fall back to basic input
+    _content_history = None
+    _torrent_history = None
+    _has_prompt_toolkit = False
+
+
+THEME = Theme(
+    {
+        "title": "bold cyan",
+        "accent": "cyan",
+        "info": "bright_cyan",
+        "ok": "bold green",
+        "warn": "bold yellow",
+        "err": "bold red",
+        "dim": "dim",
+        "path": "bright_white",
+        "k": "dim",
+        "v": "bright_white",
+    }
+)
+console = Console(theme=THEME, highlight=False)
 
 
 # ----------------------------
@@ -492,6 +539,21 @@ def sanity_checks(cfg: AppCfg) -> None:
     if cfg.docker_support and Path(cfg.paths.host_config_dir).exists():
         # friendly reminder only
         pass
+
+
+def render_header(cfg: AppCfg, runtime: str) -> None:
+    """Render a stylish startup header using Rich."""
+    table = Table(show_header=False, box=None, padding=(0, 1))
+    table.add_column("key", style="cyan")
+    table.add_column("val")
+    table.add_row("Runtime", f"[bold]{runtime}[/]")
+    table.add_row("Docker", f"{cfg.docker_support} (user={cfg.docker_user or 'none'})")
+    table.add_row("Presets", cfg.presets_yaml_host)
+    table.add_row("Output", cfg.paths.host_output_dir)
+    table.add_row("chown", f"{cfg.chown} ({cfg.ownership.uid}:{cfg.ownership.gid})")
+
+    console.rule("[title]mkbrr Wizard[/]")
+    console.print(Panel(table, title="🧙 Config", border_style="magenta", box=box.ROUNDED))
 
 
 def main() -> None:
