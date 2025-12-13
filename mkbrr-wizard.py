@@ -87,7 +87,7 @@ console = Console(theme=THEME, highlight=False)
 def _coerce_bool(v: Any, default: bool) -> bool:
     if isinstance(v, bool):
         return v
-    if isinstance(v, (int, float)):
+    if isinstance(v, int | float):
         return bool(v)
     if isinstance(v, str):
         s = v.strip().lower()
