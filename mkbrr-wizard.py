@@ -345,6 +345,80 @@ def map_torrent_path(cfg: AppCfg, runtime: str, raw: str) -> str:
 # ----------------------------
 
 
+# ----------------------------
+# Command builders (testable)
+# ----------------------------
+
+
+def build_create_command(
+    cfg: AppCfg, runtime: str, content_path: str, preset: str
+) -> tuple[list[str], str | None]:
+    """Return (cmd, cwd) for create action depending on runtime."""
+    if runtime == "docker":
+        cmd = docker_run_base(cfg, cfg.paths.container_output_dir) + [
+            "create",
+            content_path,
+            "-P",
+            preset,
+            "--preset-file",
+            cfg.presets_yaml_container,
+        ]
+        cwd = None
+    else:
+        cmd = [
+            cfg.mkbrr.binary,
+            "create",
+            content_path,
+            "-P",
+            preset,
+            "--preset-file",
+            cfg.presets_yaml_host,
+        ]
+        cwd = cfg.paths.host_output_dir
+    return cmd, cwd
+
+
+def build_inspect_command(
+    cfg: AppCfg, runtime: str, torrent_path: str, verbose: bool = False
+) -> list[str]:
+    """Return cmd for inspect action depending on runtime."""
+    if runtime == "docker":
+        cmd = docker_run_base(cfg, cfg.paths.container_config_dir) + ["inspect", torrent_path]
+    else:
+        cmd = [cfg.mkbrr.binary, "inspect", torrent_path]
+    if verbose:
+        cmd.append("-v")
+    return cmd
+
+
+def build_check_command(
+    cfg: AppCfg,
+    runtime: str,
+    torrent_path: str,
+    content_path: str,
+    verbose: bool = False,
+    quiet: bool = False,
+    workers: int | None = None,
+) -> list[str]:
+    """Return cmd for check action depending on runtime."""
+    if runtime == "docker":
+        cmd = docker_run_base(cfg, cfg.paths.container_config_dir) + [
+            "check",
+            torrent_path,
+            content_path,
+        ]
+    else:
+        cmd = [cfg.mkbrr.binary, "check", torrent_path, content_path]
+
+    if verbose:
+        cmd.append("-v")
+    if quiet:
+        cmd.append("--quiet")
+    if workers:
+        cmd += ["--workers", str(workers)]
+    return cmd
+
+
 def docker_run_base(cfg: AppCfg, workdir: str) -> list[str]:
     cmd = ["docker", "run", "--rm"]
 
