@@ -16,7 +16,10 @@ An interactive command-line wizard for working with [mkbrr](https://github.com/a
 - Python 3.10+
 - Docker
 - [mkbrr Docker image](https://github.com/autobrr/mkbrr) (`ghcr.io/autobrr/mkbrr`)
-- PyYAML (`pip install pyyaml`)
+- Python runtime dependencies: see `requirements.txt` (`pip install -r requirements.txt`)
+  - PyYAML (required)
+  - rich (UI)
+  - prompt_toolkit (optional, enhanced prompts)
 
 ## Installation
 
@@ -25,10 +28,30 @@ An interactive command-line wizard for working with [mkbrr](https://github.com/a
    git clone https://github.com/H2OKing89/mkbrr-wizard /mnt/cache/scripts/mkbrr-wizard
    ```
 
-2. Install the required Python dependency:
+2. Install the required Python dependencies (recommended):
    ```bash
-   pip install pyyaml
+   pip install -r requirements.txt
    ```
+
+   Optional extras:
+
+   - UI enhancements: `prompt_toolkit` — install with:
+     ```bash
+     pip install prompt_toolkit
+     ```
+     or if you prefer editable install with extras:
+     ```bash
+     pip install -e .[ui]
+     ```
+
+   - Developer tools (for testing/linting/formatting):
+     ```bash
+     pip install -e .[dev]
+     ```
+     or via requirements file:
+     ```bash
+     pip install -r requirements-dev.txt
+     ```
 
 3. Make the script executable:
    ```bash

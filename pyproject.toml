@@ -44,3 +44,30 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+
+[project]
+name = "mkbrr-wizard"
+version = "0.0.1"
+description = "Interactive CLI wizard for mkbrr with Rich UI support"
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+    "rich>=14.2.0",
+]
+
+[project.optional-dependencies]
+ui = [
+    "prompt_toolkit>=3.0.40",
+]
+
+dev = [
+    "pytest>=7.2",
+    "black>=23.5.0",
+    "ruff>=0.14.0,<0.19.0",
+    "isort>=5.12.0",
+    "mypy>=0.942",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
