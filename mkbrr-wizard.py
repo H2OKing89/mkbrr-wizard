@@ -29,9 +29,9 @@ from typing import Any, cast
 
 try:
     import yaml
-except ImportError:
+except ImportError as e:
     print("❌ PyYAML is not installed. Install it with:\n   pip install pyyaml")
-    raise SystemExit(1)
+    raise SystemExit(1) from e
 
 try:
     from rich import box
@@ -45,9 +45,9 @@ try:
     from rich.traceback import install as install_rich_traceback
 
     install_rich_traceback(show_locals=False)
-except ImportError:
+except ImportError as e:
     print("❌ rich is not installed. Install it with:\n   pip install rich")
-    raise SystemExit(1)
+    raise SystemExit(1) from e
 
 try:
     from prompt_toolkit.history import InMemoryHistory
