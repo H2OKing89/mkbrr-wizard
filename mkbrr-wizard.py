@@ -363,12 +363,12 @@ def maybe_fix_torrent_permissions(cfg: AppCfg) -> None:
 
     outdir = cfg.paths.host_output_dir
     if not os.path.isdir(outdir):
-        print(f"⚠️  Output dir does not exist: {outdir}")
+        console.print(f"[warn]⚠ Output dir does not exist:[/] {outdir}")
         return
 
     # Only try chown as root (Unraid root: yes; Ubuntu user: maybe no)
     if hasattr(os, "geteuid") and os.geteuid() != 0:
-        print("⚠️  chown=true but not running as root; skipping chown.")
+        console.print("[warn]⚠ chown=true but not running as root; skipping chown.[/]")
         return
 
     uid, gid = cfg.ownership.uid, cfg.ownership.gid
@@ -387,12 +387,12 @@ def maybe_fix_torrent_permissions(cfg: AppCfg) -> None:
             except FileNotFoundError:
                 continue
             except PermissionError as e:
-                print(f"  ⚠️ Permission error on {p}: {e}")
+                console.print(f"[warn]⚠ Permission error on {p}: {e}[/]")
 
     if changed:
-        print(f"🔐 chown fixed ownership on {changed} .torrent file(s).")
+        console.print(f"[ok]✅ chown fixed ownership on {changed} .torrent file(s).[/]")
     else:
-        print("🔐 ownership already correct (or nothing new to chown).")
+        console.print("[dim]ownership already correct (or nothing new to chown).[/]")
 
 
 # ----------------------------
@@ -403,7 +403,7 @@ def maybe_fix_torrent_permissions(cfg: AppCfg) -> None:
 def load_presets(host_presets_yaml: str) -> list[str]:
     p = Path(host_presets_yaml)
     if not p.exists():
-        print(f"⚠️  presets.yaml not found at {host_presets_yaml}. Using fallback: ['btn', 'custom']")
+        console.print(f"[warn]⚠ presets.yaml not found at {host_presets_yaml}. Using fallback: ['btn', 'custom'][/]")
         return ["btn", "custom"]
 
     loaded = yaml.safe_load(p.read_text(encoding="utf-8"))
@@ -422,18 +422,22 @@ def load_presets(host_presets_yaml: str) -> list[str]:
 def pick_preset(cfg: AppCfg) -> str:
     presets = load_presets(cfg.presets_yaml_host)
 
-    print(f"\n🎛  Preset selection (-P) (from {cfg.presets_yaml_host}):")
+    table = Table(title="Presets (-P)", show_header=False, box=None, padding=(0, 2))
+    table.add_column("idx", style="cyan")
+    table.add_column("name")
     for i, p in enumerate(presets, 1):
-        print(f"  [{i}] {p}")
+        table.add_row(f"[{i}]", p)
+    console.print(table)
+    console.print(f"[dim](from {cfg.presets_yaml_host})[/]")
 
-    choice = input(f"\nChoose preset [1-{len(presets)} or name, Enter=default]: ").strip()
+    choice = Prompt.ask(f"Choose preset [cyan][1-{len(presets)} or name][/]", default="1")
     if choice.isdigit():
         idx = int(choice)
         if 1 <= idx <= len(presets):
             return presets[idx - 1]
     if choice:
         if choice not in presets:
-            print(f"⚠️  '{choice}' not found in presets.yaml; mkbrr may fail.")
+            console.print(f"[warn]⚠ '{choice}' not found in presets.yaml; mkbrr may fail.[/]")
         return choice
     return "btn" if "btn" in presets else presets[0]
 
@@ -444,64 +448,84 @@ def pick_preset(cfg: AppCfg) -> str:
 
 
 def choose_action() -> str:
-    print("\n🧰 What do you want to do?")
-    print("  [1] Create a torrent from a file/folder   (mkbrr create)")
-    print("  [2] Inspect an existing .torrent file     (mkbrr inspect)")
-    print("  [3] Check data against a .torrent file    (mkbrr check)")
-    print("  [q] Quit")
+    panel = Panel(
+        "[cyan][1][/] Create a torrent from a file/folder   [dim](mkbrr create)[/]\n"
+        "[cyan][2][/] Inspect an existing .torrent file     [dim](mkbrr inspect)[/]\n"
+        "[cyan][3][/] Check data against a .torrent file    [dim](mkbrr check)[/]\n"
+        "[cyan][q][/] Quit",
+        title="🧰 Action",
+        border_style="cyan",
+        box=box.ROUNDED,
+    )
+    console.print(panel)
 
-    choice = input("\nChoose [1/2/3/q]: ").strip().lower()
-    if choice in ("2", "inspect", "i"):
+    choice = Prompt.ask("Choose", choices=["1", "2", "3", "q"], default="1")
+    if choice == "2":
         return "inspect"
-    if choice in ("3", "check", "c"):
+    if choice == "3":
         return "check"
-    if choice in ("q", "quit", "exit"):
+    if choice == "q":
         raise SystemExit(0)
     return "create"
 
 
-def ask_path(prompt: str) -> str:
-    raw = _clean_user_path(input(prompt))
+def ask_path(prompt: str, history: InMemoryHistory | None = None) -> str:
+    """Ask for a path, with optional ↑/↓ history via prompt_toolkit."""
+    if _has_prompt_toolkit and history is not None:
+        from prompt_toolkit import PromptSession as PS
+
+        session: PS[str] = PS(history=history)
+        try:
+            raw = session.prompt(f"{prompt}: ")
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit(0)
+    else:
+        raw = Prompt.ask(prompt)
+
+    raw = _clean_user_path(raw)
     if not raw:
-        raise SystemExit("❌ No path provided.")
+        console.print("[err]❌ No path provided.[/]")
+        raise SystemExit(1)
     return raw
 
 
-def ask_yes_no(prompt: str, default_no: bool = True) -> bool:
-    s = input(prompt).strip().lower()
-    if not s:
-        return not default_no
-    return s in ("y", "yes")
-
-
 def ask_verbose(mode: str) -> bool:
-    if mode == "check":
-        return ask_yes_no("\n🔍 Verbose output for check? [y/N]: ", default_no=True)
-    return ask_yes_no("\n🔍 Verbose output for inspect? [y/N]: ", default_no=True)
+    return Confirm.ask(f"Verbose output for {mode}?", default=False)
 
 
 def ask_quiet() -> bool:
-    return ask_yes_no("\n🤫 Quiet mode for check? [y/N]: ", default_no=True)
+    return Confirm.ask("Quiet mode for check?", default=False)
 
 
 def ask_workers() -> int | None:
-    s = input("\n⚙️  Workers (Enter=auto): ").strip()
-    if not s:
+    s = Prompt.ask("Workers", default="auto")
+    if s == "auto" or not s:
         return None
     try:
         v = int(s)
         return v if v > 0 else None
     except ValueError:
-        print("⚠️  Invalid workers; using auto.")
+        console.print("[warn]⚠ Invalid workers; using auto.[/]")
         return None
 
 
 def confirm_cmd(cmd: list[str], cwd: str | None = None) -> bool:
-    print("\n🚀 About to run:")
+    cmd_str = " ".join(shlex.quote(x) for x in cmd)
+
+    parts: list[Text | Syntax] = []
     if cwd:
-        print(f"   (cwd: {cwd})")
-    print("   " + " ".join(shlex.quote(x) for x in cmd))
-    return ask_yes_no("\nProceed? [Y/n]: ", default_no=False)
+        parts.append(Text(f"cwd: {cwd}", style="dim"))
+    parts.append(Syntax(cmd_str, "bash", word_wrap=True))
+
+    console.print(
+        Panel(
+            Group(*parts),
+            title="🚀 Command Preview",
+            border_style="green",
+            box=box.ROUNDED,
+        )
+    )
+    return Confirm.ask("Proceed?", default=True)
 
 
 # ----------------------------
@@ -525,8 +549,8 @@ def sanity_checks(cfg: AppCfg) -> None:
 
     # presets must exist on host for menu
     if not Path(cfg.presets_yaml_host).exists():
-        print(f"⚠️  presets.yaml not found at: {cfg.presets_yaml_host}")
-        print("    The preset menu will fall back to ['btn', 'custom'].")
+        console.print(f"[warn]⚠ presets.yaml not found at: {cfg.presets_yaml_host}[/]")
+        console.print("[dim]    The preset menu will fall back to ['btn', 'custom'].[/]")
 
     # Docker runtime requires config dir mount to include presets.yaml
     if cfg.docker_support and Path(cfg.paths.host_config_dir).exists():
@@ -557,28 +581,22 @@ def main() -> None:
     forced = "docker" if args.docker else "native" if args.native else None
     runtime = pick_runtime(cfg, forced)
 
-    print("==========================================")
-    print("  🧙 mkbrr Wizard – Docker / Native")
-    print("==========================================")
-    print(f"Runtime       : {runtime}")
-    print(f"Docker support: {cfg.docker_support} (docker_user={cfg.docker_user or 'none'})")
-    print(f"Presets (host): {cfg.presets_yaml_host}")
-    print(f"Output (host) : {cfg.paths.host_output_dir}")
-    print(f"chown         : {cfg.chown} (uid:gid {cfg.ownership.uid}:{cfg.ownership.gid})")
+    render_header(cfg, runtime)
 
     try:
         while True:
+            console.print()  # breathing room
             action = choose_action()
 
             if action == "create":
                 preset = pick_preset(cfg)
-                raw = ask_path("\n📂 Content path (/mnt/... or /data/...): ")
+                raw = ask_path("📂 Content path", history=_content_history)
                 content_path = map_content_path(cfg, runtime, raw)
 
                 # Check existence for native mode before calling mkbrr
                 if runtime == "native" and not os.path.exists(content_path):
-                    print(f"❌ Content path does not exist: {content_path}")
-                    print("   Tip: don't wrap the path in quotes (or let the wizard strip them).")
+                    console.print(f"[err]❌ Content path does not exist:[/] {content_path}")
+                    console.print("[dim]Tip: don't wrap the path in quotes (or let the wizard strip them).[/]")
                     continue
 
                 # Build command.
@@ -608,16 +626,13 @@ def main() -> None:
                 if confirm_cmd(cmd, cwd=cwd):
                     r = subprocess.run(cmd, cwd=cwd, check=False)
                     if r.returncode == 0:
-                        print("\n✅ mkbrr create finished.")
+                        console.print("[ok]✅ mkbrr create finished.[/]")
                         maybe_fix_torrent_permissions(cfg)
                     else:
-                        print(f"\n❌ mkbrr exited with code {r.returncode}")
+                        console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
 
             elif action == "inspect":
-                raw = ask_path(
-                    f"\n📄 Torrent file path (host {cfg.paths.host_output_dir}/..."
-                    f" or container {cfg.paths.container_output_dir}/...): "
-                )
+                raw = ask_path("📄 Torrent file path", history=_torrent_history)
                 torrent_path = map_torrent_path(cfg, runtime, raw)
                 verbose = ask_verbose("inspect")
 
@@ -631,26 +646,33 @@ def main() -> None:
 
                 if confirm_cmd(cmd):
                     r = subprocess.run(cmd, check=False)
-                    print(
-                        "\n✅ done." if r.returncode == 0 else f"\n❌ mkbrr exited with code {r.returncode}"
-                    )
+                    if r.returncode == 0:
+                        console.print("[ok]✅ done.[/]")
+                    else:
+                        console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
 
             elif action == "check":
-                raw_t = ask_path(
-                    f"\n📄 Torrent file path (host {cfg.paths.host_output_dir}/..."
-                    f" or container {cfg.paths.container_output_dir}/...): "
-                )
-                raw_c = ask_path("\n📂 Content path to verify (/mnt/... or /data/...): ")
+                raw_t = ask_path("📄 Torrent file path", history=_torrent_history)
+                raw_c = ask_path("📂 Content path to verify", history=_content_history)
 
                 torrent_path = map_torrent_path(cfg, runtime, raw_t)
                 content_path = map_content_path(cfg, runtime, raw_c)
+
+                # Validate paths before running mkbrr
+                if runtime == "native":
+                    if not os.path.isfile(torrent_path):
+                        console.print(f"[err]❌ Torrent file not found:[/] {torrent_path}")
+                        continue
+                    if not os.path.exists(content_path):
+                        console.print(f"[err]❌ Content path not found:[/] {content_path}")
+                        continue
 
                 verbose = ask_verbose("check")
                 quiet = ask_quiet()
                 workers = ask_workers()
 
                 if quiet and verbose:
-                    print("⚠️  Both verbose and quiet selected; preferring quiet.")
+                    console.print("[warn]⚠ Both verbose and quiet selected; preferring quiet.[/]")
                     verbose = False
 
                 if runtime == "docker":
@@ -671,19 +693,18 @@ def main() -> None:
 
                 if confirm_cmd(cmd):
                     r = subprocess.run(cmd, check=False)
-                    print(
-                        "\n✅ data verified."
-                        if r.returncode == 0
-                        else f"\n❌ mkbrr exited with code {r.returncode}"
-                    )
+                    if r.returncode == 0:
+                        console.print("[ok]✅ data verified.[/]")
+                    else:
+                        console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
 
-            again = input("\n🔄 Do another operation? [y/N]: ").strip().lower()
-            if again not in ("y", "yes"):
-                print("👋 Bye.")
+            console.rule(style="dim")
+            if not Confirm.ask("Do another operation?", default=False):
+                console.print("[dim]👋 Bye.[/]")
                 break
 
     except (KeyboardInterrupt, EOFError):
-        print("\n⏹  Interrupted. Bye.")
+        console.print("\n[dim]⏹ Interrupted. Bye.[/]")
 
 
 if __name__ == "__main__":
