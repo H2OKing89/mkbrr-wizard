@@ -1,75 +1,172 @@
-"""Tests for mkbrr-wizard path conversion functions.
-"""
+"""Tests for mkbrr-wizard path conversion functions (new config-driven API)."""
 
-from tests.conftest import host_to_container_path, host_to_container_torrent_path
+from __future__ import annotations
+
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+import pytest  # type: ignore[import-untyped]
 
 
-class TestHostToContainerPath:
-    """Tests for host_to_container_path function."""
+class TestMapContentPath:
+    """Tests for map_content_path function (config-driven)."""
 
-    def test_already_container_path(self):
-        """Container paths should pass through unchanged."""
-        assert host_to_container_path("/data/downloads/file.mkv") == "/data/downloads/file.mkv"
-        assert host_to_container_path("/data") == "/data"
-        assert host_to_container_path("/data/") == "/data/"
+    @pytest.fixture
+    def sample_cfg(self, mkbrr_wizard: ModuleType) -> Any:
+        """Create a sample config for testing."""
+        return mkbrr_wizard.AppCfg(
+            runtime="auto",
+            docker_support=True,
+            chown=False,
+            docker_user=None,
+            mkbrr=mkbrr_wizard.MkbrrCfg(binary="mkbrr", image="ghcr.io/autobrr/mkbrr"),
+            paths=mkbrr_wizard.PathsCfg(
+                host_data_root="/mnt/user/data",
+                container_data_root="/data",
+                host_output_dir="/mnt/user/data/downloads/torrents/torrentfiles",
+                container_output_dir="/torrentfiles",
+                host_config_dir="/mnt/cache/appdata/mkbrr",
+                container_config_dir="/root/.config/mkbrr",
+            ),
+            ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
+            presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
+            presets_yaml_container="/root/.config/mkbrr/presets.yaml",
+        )
 
-    def test_host_path_conversion(self):
-        """Host paths under HOST_DATA_ROOT should be converted."""
+    def test_docker_already_container_path(self, mkbrr_wizard: ModuleType, sample_cfg: Any) -> None:
+        """Container paths in docker mode should pass through unchanged."""
         assert (
-            host_to_container_path("/mnt/user/data/downloads/file.mkv")
+            mkbrr_wizard.map_content_path(sample_cfg, "docker", "/data/downloads/file.mkv")
             == "/data/downloads/file.mkv"
         )
-        assert host_to_container_path("/mnt/user/data") == "/data"
-        assert host_to_container_path("/mnt/user/data/movies/test") == "/data/movies/test"
+        assert mkbrr_wizard.map_content_path(sample_cfg, "docker", "/data") == "/data"
 
-    def test_host_path_with_whitespace(self):
-        """Paths with leading/trailing whitespace should be trimmed."""
-        assert host_to_container_path("  /mnt/user/data/file  ") == "/data/file"
-        assert host_to_container_path("  /data/file  ") == "/data/file"
-
-    def test_non_matching_path_passthrough(self):
-        """Paths not under HOST_DATA_ROOT should pass through."""
-        assert host_to_container_path("/some/other/path") == "/some/other/path"
-        assert host_to_container_path("/tmp/test") == "/tmp/test"
-
-    def test_nested_paths(self):
-        """Deeply nested paths should be handled correctly."""
-        path = "/mnt/user/data/downloads/movies/2024/action/movie.mkv"
-        expected = "/data/downloads/movies/2024/action/movie.mkv"
-        assert host_to_container_path(path) == expected
-
-
-class TestHostToContainerTorrentPath:
-    """Tests for host_to_container_torrent_path function."""
-
-    def test_already_container_path(self):
-        """Container torrent paths should pass through unchanged."""
+    def test_docker_host_to_container(self, mkbrr_wizard: ModuleType, sample_cfg: Any) -> None:
+        """Host paths in docker mode should be converted to container paths."""
         assert (
-            host_to_container_torrent_path("/torrentfiles/test.torrent")
+            mkbrr_wizard.map_content_path(
+                sample_cfg, "docker", "/mnt/user/data/downloads/file.mkv"
+            )
+            == "/data/downloads/file.mkv"
+        )
+        assert (
+            mkbrr_wizard.map_content_path(sample_cfg, "docker", "/mnt/user/data")
+            == "/data"
+        )
+
+    def test_native_already_host_path(self, mkbrr_wizard: ModuleType, sample_cfg: Any) -> None:
+        """Host paths in native mode should pass through unchanged."""
+        assert (
+            mkbrr_wizard.map_content_path(
+                sample_cfg, "native", "/mnt/user/data/downloads/file.mkv"
+            )
+            == "/mnt/user/data/downloads/file.mkv"
+        )
+
+    def test_native_container_to_host(self, mkbrr_wizard: ModuleType, sample_cfg: Any) -> None:
+        """Container paths in native mode should be converted to host paths."""
+        assert (
+            mkbrr_wizard.map_content_path(sample_cfg, "native", "/data/downloads/file.mkv")
+            == "/mnt/user/data/downloads/file.mkv"
+        )
+
+    def test_whitespace_trimmed(self, mkbrr_wizard: ModuleType, sample_cfg: Any) -> None:
+        """Paths with leading/trailing whitespace should be trimmed."""
+        assert (
+            mkbrr_wizard.map_content_path(sample_cfg, "docker", "  /mnt/user/data/file  ")
+            == "/data/file"
+        )
+
+
+class TestMapTorrentPath:
+    """Tests for map_torrent_path function (config-driven)."""
+
+    @pytest.fixture
+    def sample_cfg(self, mkbrr_wizard: ModuleType) -> Any:
+        """Create a sample config for testing."""
+        return mkbrr_wizard.AppCfg(
+            runtime="auto",
+            docker_support=True,
+            chown=False,
+            docker_user=None,
+            mkbrr=mkbrr_wizard.MkbrrCfg(binary="mkbrr", image="ghcr.io/autobrr/mkbrr"),
+            paths=mkbrr_wizard.PathsCfg(
+                host_data_root="/mnt/user/data",
+                container_data_root="/data",
+                host_output_dir="/mnt/user/data/downloads/torrents/torrentfiles",
+                container_output_dir="/torrentfiles",
+                host_config_dir="/mnt/cache/appdata/mkbrr",
+                container_config_dir="/root/.config/mkbrr",
+            ),
+            ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
+            presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
+            presets_yaml_container="/root/.config/mkbrr/presets.yaml",
+        )
+
+    def test_docker_already_container_path(self, mkbrr_wizard: ModuleType, sample_cfg: Any) -> None:
+        """Container torrent paths in docker mode should pass through unchanged."""
+        assert (
+            mkbrr_wizard.map_torrent_path(sample_cfg, "docker", "/torrentfiles/test.torrent")
             == "/torrentfiles/test.torrent"
         )
-        assert host_to_container_torrent_path("/torrentfiles") == "/torrentfiles"
 
-    def test_host_torrent_path_conversion(self):
-        """Host torrent paths should be converted."""
+    def test_docker_host_to_container(self, mkbrr_wizard: ModuleType, sample_cfg: Any) -> None:
+        """Host torrent paths in docker mode should be converted."""
         host_path = "/mnt/user/data/downloads/torrents/torrentfiles/test.torrent"
         expected = "/torrentfiles/test.torrent"
-        assert host_to_container_torrent_path(host_path) == expected
+        assert mkbrr_wizard.map_torrent_path(sample_cfg, "docker", host_path) == expected
 
-    def test_host_torrent_path_with_whitespace(self):
-        """Paths with leading/trailing whitespace should be trimmed."""
-        path = "  /mnt/user/data/downloads/torrents/torrentfiles/test.torrent  "
-        expected = "/torrentfiles/test.torrent"
-        assert host_to_container_torrent_path(path) == expected
+    def test_native_already_host_path(self, mkbrr_wizard: ModuleType, sample_cfg: Any) -> None:
+        """Host torrent paths in native mode should pass through unchanged."""
+        host_path = "/mnt/user/data/downloads/torrents/torrentfiles/test.torrent"
+        assert mkbrr_wizard.map_torrent_path(sample_cfg, "native", host_path) == host_path
 
-    def test_non_matching_path_passthrough(self):
-        """Paths not under HOST_OUTPUT_DIR should pass through."""
+    def test_native_container_to_host(self, mkbrr_wizard: ModuleType, sample_cfg: Any) -> None:
+        """Container torrent paths in native mode should be converted to host."""
         assert (
-            host_to_container_torrent_path("/some/other/path.torrent") == "/some/other/path.torrent"
+            mkbrr_wizard.map_torrent_path(sample_cfg, "native", "/torrentfiles/test.torrent")
+            == "/mnt/user/data/downloads/torrents/torrentfiles/test.torrent"
         )
 
-    def test_nested_torrent_paths(self):
-        """Nested paths under torrentfiles should be handled correctly."""
-        host_path = "/mnt/user/data/downloads/torrents/torrentfiles/subdir/test.torrent"
-        expected = "/torrentfiles/subdir/test.torrent"
-        assert host_to_container_torrent_path(host_path) == expected
+
+class TestExpandPath:
+    """Tests for _expand_path helper."""
+
+    def test_tilde_expansion(self, mkbrr_wizard: ModuleType) -> None:
+        """Tilde should expand to home directory."""
+        result: str = mkbrr_wizard._expand_path("~/test")
+        assert result == str(Path.home() / "test")
+
+    def test_env_var_expansion(self, mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:
+        """Environment variables should be expanded."""
+        monkeypatch.setenv("MY_TEST_VAR", "/custom/path")
+        result: str = mkbrr_wizard._expand_path("$MY_TEST_VAR/subdir")
+        assert result == "/custom/path/subdir"
+
+    def test_empty_string(self, mkbrr_wizard: ModuleType) -> None:
+        """Empty string should return empty string."""
+        assert mkbrr_wizard._expand_path("") == ""
+        assert mkbrr_wizard._expand_path("   ") == ""
+
+
+class TestCleanUserPath:
+    """Tests for _clean_user_path helper."""
+
+    def test_strips_quotes(self, mkbrr_wizard: ModuleType) -> None:
+        """Surrounding quotes should be stripped."""
+        assert mkbrr_wizard._clean_user_path("'/path/to/file'") == "/path/to/file"
+        assert mkbrr_wizard._clean_user_path('"/path/to/file"') == "/path/to/file"
+
+    def test_strips_whitespace(self, mkbrr_wizard: ModuleType) -> None:
+        """Leading/trailing whitespace should be stripped."""
+        assert mkbrr_wizard._clean_user_path("  /path/to/file  ") == "/path/to/file"
+
+    def test_handles_quotes_with_whitespace(self, mkbrr_wizard: ModuleType) -> None:
+        """Quotes with whitespace should be handled."""
+        assert mkbrr_wizard._clean_user_path("  '/path/to/file'  ") == "/path/to/file"
+
+    def test_expands_tilde(self, mkbrr_wizard: ModuleType) -> None:
+        """Tilde should be expanded after quote stripping."""
+        result: str = mkbrr_wizard._clean_user_path("'~/test'")
+        assert result == str(Path.home() / "test")
