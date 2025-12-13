@@ -191,9 +191,9 @@ def load_config(path: Path) -> AppCfg:
 
     paths_node: dict[str, Any] = cast(dict[str, Any], raw.get("paths") or {})
     paths = PathsCfg(
-        host_data_root=_expand_path(
-            str(paths_node.get("host_data_root", "/mnt/user/data"))
-        ).rstrip("/"),
+        host_data_root=_expand_path(str(paths_node.get("host_data_root", "/mnt/user/data"))).rstrip(
+            "/"
+        ),
         container_data_root=str(paths_node.get("container_data_root", "/data")).rstrip("/"),
         host_output_dir=_expand_path(
             str(paths_node.get("host_output_dir", "/mnt/user/data/downloads/torrents/torrentfiles"))
