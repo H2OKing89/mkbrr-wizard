@@ -495,7 +495,9 @@ def maybe_fix_torrent_permissions(cfg: AppCfg) -> None:
 def load_presets(host_presets_yaml: str) -> list[str]:
     p = Path(host_presets_yaml)
     if not p.exists():
-        console.print(f"[warn]⚠ presets.yaml not found at {host_presets_yaml}. Using fallback: ['btn', 'custom'][/]")
+        console.print(
+            f"[warn]⚠ presets.yaml not found at {host_presets_yaml}. Using fallback: ['btn', 'custom'][/]"
+        )
         return ["btn", "custom"]
 
     loaded = yaml.safe_load(p.read_text(encoding="utf-8"))
@@ -522,7 +524,9 @@ def pick_preset(cfg: AppCfg) -> str:
     console.print(table)
     console.print(f"[dim](from {cfg.presets_yaml_host})[/]")
 
-    choice = Prompt.ask(f"Choose preset [cyan][1-{len(presets)} or name][/]", default="1")
+    choice = cast(
+        str, Prompt.ask(f"Choose preset [cyan][1-{len(presets)} or name][/]", default="1")
+    )
     if choice.isdigit():
         idx = int(choice)
         if 1 <= idx <= len(presets):
@@ -551,7 +555,7 @@ def choose_action() -> str:
     )
     console.print(panel)
 
-    choice = Prompt.ask("Choose", choices=["1", "2", "3", "q"], default="1")
+    choice = cast(str, Prompt.ask("Choose", choices=["1", "2", "3", "q"], default="1"))
     if choice == "2":
         return "inspect"
     if choice == "3":
@@ -568,11 +572,11 @@ def ask_path(prompt: str, history: InMemoryHistory | None = None) -> str:
 
         session: PS[str] = PS(history=history)
         try:
-            raw = session.prompt(f"{prompt}: ")
-        except (EOFError, KeyboardInterrupt):
-            raise SystemExit(0)
+            raw = cast(str, session.prompt(f"{prompt}: "))
+        except (EOFError, KeyboardInterrupt) as e:
+            raise SystemExit(0) from e
     else:
-        raw = Prompt.ask(prompt)
+        raw = cast(str, Prompt.ask(prompt))
 
     raw = _clean_user_path(raw)
     if not raw:
@@ -582,15 +586,15 @@ def ask_path(prompt: str, history: InMemoryHistory | None = None) -> str:
 
 
 def ask_verbose(mode: str) -> bool:
-    return Confirm.ask(f"Verbose output for {mode}?", default=False)
+    return cast(bool, Confirm.ask(f"Verbose output for {mode}?", default=False))
 
 
 def ask_quiet() -> bool:
-    return Confirm.ask("Quiet mode for check?", default=False)
+    return cast(bool, Confirm.ask("Quiet mode for check?", default=False))
 
 
 def ask_workers() -> int | None:
-    s = Prompt.ask("Workers", default="auto")
+    s = cast(str, Prompt.ask("Workers", default="auto"))
     if s == "auto" or not s:
         return None
     try:
@@ -617,7 +621,7 @@ def confirm_cmd(cmd: list[str], cwd: str | None = None) -> bool:
             box=box.ROUNDED,
         )
     )
-    return Confirm.ask("Proceed?", default=True)
+    return cast(bool, Confirm.ask("Proceed?", default=True))
 
 
 # ----------------------------
@@ -688,7 +692,9 @@ def main() -> None:
                 # Check existence for native mode before calling mkbrr
                 if runtime == "native" and not os.path.exists(content_path):
                     console.print(f"[err]❌ Content path does not exist:[/] {content_path}")
-                    console.print("[dim]Tip: don't wrap the path in quotes (or let the wizard strip them).[/]")
+                    console.print(
+                        "[dim]Tip: don't wrap the path in quotes (or let the wizard strip them).[/]"
+                    )
                     continue
 
                 # Build command.
@@ -729,7 +735,10 @@ def main() -> None:
                 verbose = ask_verbose("inspect")
 
                 if runtime == "docker":
-                    cmd = docker_run_base(cfg, cfg.paths.container_config_dir) + ["inspect", torrent_path]
+                    cmd = docker_run_base(cfg, cfg.paths.container_config_dir) + [
+                        "inspect",
+                        torrent_path,
+                    ]
                 else:
                     cmd = [cfg.mkbrr.binary, "inspect", torrent_path]
 
