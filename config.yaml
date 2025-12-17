@@ -1,0 +1,35 @@
+# mkbrr-wizard configuration
+# runtime selection:
+#   auto   = docker if available (and docker_support:true), else native
+#   docker = force docker
+#   native = force local mkbrr binary
+runtime: auto
+
+docker_support: true
+chown: true
+
+mkbrr:
+  binary: mkbrr
+  image: ghcr.io/autobrr/mkbrr
+
+paths:
+  host_data_root: /mnt
+  container_data_root: /mnt
+
+  host_output_dir: /mnt/cache-temp/data/downloads/torrents/torrentfiles
+  container_output_dir: /torrentfiles
+
+  # IMPORTANT for Docker runtime so presets.yaml is visible inside container
+  host_config_dir: /mnt/cache/appdata/mkbrr
+  container_config_dir: /root/.config/mkbrr
+
+# You can use either an absolute path OR a path relative to host_config_dir
+presets_yaml: presets.yaml
+
+ownership:
+  uid: 99
+  gid: 100
+
+# Optional: run mkbrr inside docker as nobody:users so files are created with correct ownership
+# If set, you may not even need chown afterwards.
+# docker_user: "99:100"
