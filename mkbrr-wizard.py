@@ -629,10 +629,18 @@ def confirm_cmd(cmd: list[str], cwd: str | None = None) -> bool:
 # ----------------------------
 
 
+def _default_config_path() -> str:
+    """Return default config.yaml path relative to the script's location."""
+    script_dir = Path(__file__).resolve().parent
+    return str(script_dir / "config.yaml")
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument(
-        "--config", default="config.yaml", help="Path to config.yaml (default: ./config.yaml)"
+        "--config",
+        default=_default_config_path(),
+        help="Path to config.yaml (default: <script_dir>/config.yaml)",
     )
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--docker", action="store_true", help="Force docker runtime")
