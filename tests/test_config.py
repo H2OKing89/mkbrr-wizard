@@ -195,7 +195,7 @@ batch:
             temp_path = f.name
 
         try:
-            with pytest.raises(ValueError, match="batch.mode must be one of"):
+            with pytest.raises(ValueError, match=r"batch\.mode must be one of"):
                 mkbrr_wizard.load_config(Path(temp_path))
         finally:
             os.unlink(temp_path)

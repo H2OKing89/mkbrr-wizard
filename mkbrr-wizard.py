@@ -18,6 +18,7 @@ Key points:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import shutil
@@ -404,7 +405,8 @@ def build_batch_create_command(
 ) -> tuple[list[str], str | None]:
     """Return (cmd, cwd) for batch create action depending on runtime."""
     if runtime == "docker":
-        cmd = docker_run_base(cfg, cfg.paths.container_config_dir) + [
+        cmd = [
+            *docker_run_base(cfg, cfg.paths.container_config_dir),
             "create",
             "-b",
             batch_file_path,
@@ -699,7 +701,11 @@ def load_batch_schema() -> dict[str, Any]:
     if not schema_path.exists():
         raise FileNotFoundError(f"Batch schema not found: {schema_path}")
 
-    loaded = yaml.safe_load(schema_path.read_text(encoding="utf-8"))
+    try:
+        loaded = json.loads(schema_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in batch schema at {schema_path}: {e}") from e
+
     if not isinstance(loaded, dict):
         raise ValueError(f"Batch schema must be a JSON object at: {schema_path}")
     return cast(dict[str, Any], loaded)
@@ -766,7 +772,7 @@ def ask_optional_text(prompt: str, default: str | None = None) -> str | None:
     return raw or None
 
 
-def ask_optional_bool(prompt: str, default: bool | None = None) -> bool | None:
+def ask_optional_bool(prompt: str, *, default: bool | None = None) -> bool | None:
     default_choice = "skip"
     if default is True:
         default_choice = "y"
@@ -1150,8 +1156,14 @@ def main() -> None:
                     continue
 
                 host_batch_file: str | None = None
+                container_batch_file: str | None = None
                 try:
                     host_batch_file, container_batch_file = write_temp_batch_file(cfg, payload)
+                except OSError as e:
+                    console.print(f"[err]❌ Could not write temporary batch file: {e}[/]")
+                    continue
+
+                try:
                     batch_file_path = host_batch_file
                     if runtime == "docker":
                         if not container_batch_file:
@@ -1168,9 +1180,9 @@ def main() -> None:
                         r = subprocess.run(cmd, cwd=cwd, check=False)
                         if r.returncode == 0:
                             console.print("[ok]✅ mkbrr batch create finished.[/]")
+                            maybe_fix_torrent_permissions(cfg)
                         else:
                             console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
-                        maybe_fix_torrent_permissions(cfg)
                 finally:
                     if host_batch_file:
                         try:

@@ -12,6 +12,13 @@ def _mk_args(config_path: str) -> SimpleNamespace:
 
 
 class _Seq:
+    """Yield scripted prompt answers for tests.
+
+    The `_Seq.__call__` method returns the next item each time it is invoked.
+    If `_Seq.__call__` is invoked more times than available items, it raises
+    `StopIteration` (which can surface as `RuntimeError` in generator contexts).
+    """
+
     def __init__(self, items):
         self._it = iter(items)
 
@@ -43,6 +50,53 @@ def _sample_cfg(mkbrr_wizard: ModuleType, tmp_path: Path) -> Any:
     )
 
 
+def _build_main_batch_test_files(
+    tmp_path: Path,
+    *,
+    runtime: str,
+    docker_support: bool,
+    batch_mode: str = "simple",
+) -> tuple[Path, Path, Path, Path, Path, Path, Path]:
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    presets_yaml = cfg_dir / "presets.yaml"
+    presets_yaml.write_text("presets:\n  btn:\n    announce: https://example.com/announce\n")
+
+    host_data = tmp_path / "data"
+    host_data.mkdir()
+    content = host_data / "movie.mkv"
+    content.write_text("x")
+
+    output_dir = tmp_path / "torrents"
+    output_dir.mkdir()
+    output = output_dir / "movie.torrent"
+
+    batch_block = ""
+    if batch_mode != "simple":
+        batch_block = f"batch:\n  mode: {batch_mode}\n"
+
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        f"""
+runtime: {runtime}
+docker_support: {'true' if docker_support else 'false'}
+chown: true
+{batch_block}mkbrr:
+    binary: mkbrr
+paths:
+    host_data_root: {host_data}
+    container_data_root: /data
+    host_output_dir: {output_dir}
+    container_output_dir: /torrentfiles
+    host_config_dir: {cfg_dir}
+    container_config_dir: /root/.config/mkbrr
+presets_yaml: {presets_yaml}
+"""
+    )
+
+    return config_yaml, cfg_dir, host_data, output_dir, presets_yaml, content, output
+
+
 def test_validate_batch_payload_success(mkbrr_wizard: ModuleType) -> None:
     schema = mkbrr_wizard.load_batch_schema()
     payload = {
@@ -54,24 +108,37 @@ def test_validate_batch_payload_success(mkbrr_wizard: ModuleType) -> None:
     assert errors == []
 
 
-def test_validate_batch_payload_failures(mkbrr_wizard: ModuleType) -> None:
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            {"jobs": [{"output": "/torrentfiles/x.torrent", "path": "/data/x.mkv"}]},
+            id="missing_version",
+        ),
+        pytest.param({"version": 1}, id="missing_jobs"),
+        pytest.param(
+            {"version": 1, "jobs": [{"path": "/data/x.mkv"}]},
+            id="missing_output",
+        ),
+        pytest.param(
+            {
+                "version": 1,
+                "jobs": [
+                    {
+                        "output": "/torrentfiles/x.torrent",
+                        "path": "/data/x.mkv",
+                        "piece_length": 30,
+                    }
+                ],
+            },
+            id="piece_length_out_of_range",
+        ),
+    ],
+)
+def test_validate_batch_payload_failures(mkbrr_wizard: ModuleType, payload: dict[str, Any]) -> None:
     schema = mkbrr_wizard.load_batch_schema()
-
-    invalid_payloads = [
-        {"jobs": [{"output": "/torrentfiles/x.torrent", "path": "/data/x.mkv"}]},  # missing version
-        {"version": 1},  # missing jobs
-        {"version": 1, "jobs": [{"path": "/data/x.mkv"}]},  # missing output
-        {
-            "version": 1,
-            "jobs": [
-                {"output": "/torrentfiles/x.torrent", "path": "/data/x.mkv", "piece_length": 30}
-            ],
-        },  # out of range
-    ]
-
-    for payload in invalid_payloads:
-        errors = mkbrr_wizard.validate_batch_payload(payload, schema)
-        assert errors
+    errors = mkbrr_wizard.validate_batch_payload(payload, schema)
+    assert errors
 
 
 def test_map_batch_job_paths_docker(mkbrr_wizard: ModuleType, tmp_path: Path) -> None:
@@ -261,37 +328,8 @@ def test_collect_batch_jobs_interactive_advanced_includes_optional(
 
 
 def test_main_batch_success_native(tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:
-    cfg_dir = tmp_path / "cfg"
-    cfg_dir.mkdir()
-    presets_yaml = cfg_dir / "presets.yaml"
-    presets_yaml.write_text("presets:\n  btn:\n    announce: https://example.com/announce\n")
-
-    host_data = tmp_path / "data"
-    host_data.mkdir()
-    content = host_data / "movie.mkv"
-    content.write_text("x")
-
-    output_dir = tmp_path / "torrents"
-    output_dir.mkdir()
-    output = output_dir / "movie.torrent"
-
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
-runtime: native
-docker_support: false
-chown: true
-mkbrr:
-  binary: mkbrr
-paths:
-  host_data_root: {host_data}
-  container_data_root: /data
-  host_output_dir: {output_dir}
-  container_output_dir: /torrentfiles
-  host_config_dir: {cfg_dir}
-  container_config_dir: /root/.config/mkbrr
-presets_yaml: {presets_yaml}
-"""
+    config_yaml, _, _, _, _, content, output = _build_main_batch_test_files(
+        tmp_path, runtime="native", docker_support=False
     )
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
@@ -341,37 +379,8 @@ presets_yaml: {presets_yaml}
 
 
 def test_main_batch_success_docker(tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:
-    cfg_dir = tmp_path / "cfg"
-    cfg_dir.mkdir()
-    presets_yaml = cfg_dir / "presets.yaml"
-    presets_yaml.write_text("presets:\n  btn:\n    announce: https://example.com/announce\n")
-
-    host_data = tmp_path / "data"
-    host_data.mkdir()
-    content = host_data / "movie.mkv"
-    content.write_text("x")
-
-    output_dir = tmp_path / "torrents"
-    output_dir.mkdir()
-    output = output_dir / "movie.torrent"
-
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
-runtime: auto
-docker_support: true
-chown: true
-mkbrr:
-  binary: mkbrr
-paths:
-  host_data_root: {host_data}
-  container_data_root: /data
-  host_output_dir: {output_dir}
-  container_output_dir: /torrentfiles
-  host_config_dir: {cfg_dir}
-  container_config_dir: /root/.config/mkbrr
-presets_yaml: {presets_yaml}
-"""
+    config_yaml, cfg_dir, _, _, _, content, output = _build_main_batch_test_files(
+        tmp_path, runtime="auto", docker_support=True
     )
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
@@ -428,39 +437,8 @@ presets_yaml: {presets_yaml}
 def test_main_batch_success_advanced_mode_prompts_optional(
     tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
 ) -> None:
-    cfg_dir = tmp_path / "cfg"
-    cfg_dir.mkdir()
-    presets_yaml = cfg_dir / "presets.yaml"
-    presets_yaml.write_text("presets:\n  btn:\n    announce: https://example.com/announce\n")
-
-    host_data = tmp_path / "data"
-    host_data.mkdir()
-    content = host_data / "movie.mkv"
-    content.write_text("x")
-
-    output_dir = tmp_path / "torrents"
-    output_dir.mkdir()
-    output = output_dir / "movie.torrent"
-
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
-runtime: native
-docker_support: false
-chown: true
-batch:
-  mode: advanced
-mkbrr:
-  binary: mkbrr
-paths:
-  host_data_root: {host_data}
-  container_data_root: /data
-  host_output_dir: {output_dir}
-  container_output_dir: /torrentfiles
-  host_config_dir: {cfg_dir}
-  container_config_dir: /root/.config/mkbrr
-presets_yaml: {presets_yaml}
-"""
+    config_yaml, _, _, _, _, content, output = _build_main_batch_test_files(
+        tmp_path, runtime="native", docker_support=False, batch_mode="advanced"
     )
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
@@ -517,28 +495,8 @@ presets_yaml: {presets_yaml}
 def test_main_batch_validation_failure_skips_execution(
     tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
 ) -> None:
-    cfg_dir = tmp_path / "cfg"
-    cfg_dir.mkdir()
-    presets_yaml = cfg_dir / "presets.yaml"
-    presets_yaml.write_text("presets:\n  btn:\n    announce: https://example.com/announce\n")
-
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
-runtime: native
-docker_support: false
-chown: true
-mkbrr:
-  binary: mkbrr
-paths:
-  host_data_root: {tmp_path}/data
-  container_data_root: /data
-  host_output_dir: {tmp_path}/torrents
-  container_output_dir: /torrentfiles
-  host_config_dir: {cfg_dir}
-  container_config_dir: /root/.config/mkbrr
-presets_yaml: {presets_yaml}
-"""
+    config_yaml, _, _, _, _, _, _ = _build_main_batch_test_files(
+        tmp_path, runtime="native", docker_support=False
     )
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
@@ -567,31 +525,11 @@ presets_yaml: {presets_yaml}
     assert called["count"] == 0
 
 
-def test_main_batch_nonzero_exit_still_chowns(
+def test_main_batch_nonzero_exit_skips_chown(
     tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
 ) -> None:
-    cfg_dir = tmp_path / "cfg"
-    cfg_dir.mkdir()
-    presets_yaml = cfg_dir / "presets.yaml"
-    presets_yaml.write_text("presets:\n  btn:\n    announce: https://example.com/announce\n")
-
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
-runtime: native
-docker_support: false
-chown: true
-mkbrr:
-  binary: mkbrr
-paths:
-  host_data_root: {tmp_path}/data
-  container_data_root: /data
-  host_output_dir: {tmp_path}/torrents
-  container_output_dir: /torrentfiles
-  host_config_dir: {cfg_dir}
-  container_config_dir: /root/.config/mkbrr
-presets_yaml: {presets_yaml}
-"""
+    config_yaml, _, _, _, _, _, _ = _build_main_batch_test_files(
+        tmp_path, runtime="native", docker_support=False
     )
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
@@ -619,34 +557,14 @@ presets_yaml: {presets_yaml}
     )
 
     mkbrr_wizard.main()
-    assert chown_called["count"] == 1
+    assert chown_called["count"] == 0
 
 
 def test_main_batch_cancel_removes_temp_file(
     tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
 ) -> None:
-    cfg_dir = tmp_path / "cfg"
-    cfg_dir.mkdir()
-    presets_yaml = cfg_dir / "presets.yaml"
-    presets_yaml.write_text("presets:\n  btn:\n    announce: https://example.com/announce\n")
-
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
-runtime: native
-docker_support: false
-chown: true
-mkbrr:
-  binary: mkbrr
-paths:
-  host_data_root: {tmp_path}/data
-  container_data_root: /data
-  host_output_dir: {tmp_path}/torrents
-  container_output_dir: /torrentfiles
-  host_config_dir: {cfg_dir}
-  container_config_dir: /root/.config/mkbrr
-presets_yaml: {presets_yaml}
-"""
+    config_yaml, cfg_dir, _, _, _, _, _ = _build_main_batch_test_files(
+        tmp_path, runtime="native", docker_support=False
     )
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
@@ -659,13 +577,11 @@ presets_yaml: {presets_yaml}
         lambda cfg: {"version": 1, "jobs": [{"output": "/tmp/a.torrent", "path": "/tmp/a.mkv"}]},
     )
     monkeypatch.setattr(mkbrr_wizard.Confirm, "ask", _Seq([False, False]))  # cancel run, do another
-    monkeypatch.setattr(
-        mkbrr_wizard.subprocess,
-        "run",
-        lambda *a, **k: (_ for _ in ()).throw(
-            AssertionError("subprocess.run should not be called")
-        ),
-    )
+
+    def raise_on_run(*args, **kwargs):
+        raise AssertionError("subprocess.run should not be called")
+
+    monkeypatch.setattr(mkbrr_wizard.subprocess, "run", raise_on_run)
 
     mkbrr_wizard.main()
     assert not list(cfg_dir.glob("mkbrr-batch-*.yaml"))
