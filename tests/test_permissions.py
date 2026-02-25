@@ -24,6 +24,7 @@ def test_maybe_fix_torrent_permissions_skips_when_not_root(
             container_config_dir="/root/.config/mkbrr",
         ),
         ownership=mkbrr_wizard.OwnershipCfg(uid=1000, gid=1000),
+        batch=mkbrr_wizard.BatchCfg(mode="simple"),
         presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
         presets_yaml_container="/root/.config/mkbrr/presets.yaml",
     )
@@ -62,6 +63,7 @@ def test_maybe_fix_torrent_permissions_executes_chown(
             container_config_dir="/root/.config/mkbrr",
         ),
         ownership=mkbrr_wizard.OwnershipCfg(uid=999999, gid=999999),
+        batch=mkbrr_wizard.BatchCfg(mode="simple"),
         presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
         presets_yaml_container="/root/.config/mkbrr/presets.yaml",
     )

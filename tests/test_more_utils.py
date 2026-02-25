@@ -52,6 +52,7 @@ def test_render_header_and_docker_run_base(monkeypatch: Any, mkbrr_wizard: Modul
             container_config_dir="/root/.config/mkbrr",
         ),
         ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
+        batch=mkbrr_wizard.BatchCfg(mode="simple"),
         presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
         presets_yaml_container="/root/.config/mkbrr/presets.yaml",
     )
@@ -83,6 +84,7 @@ def test_maybe_fix_torrent_permissions_permission_error(
             container_config_dir="/root/.config/mkbrr",
         ),
         ownership=mkbrr_wizard.OwnershipCfg(uid=1000, gid=1000),
+        batch=mkbrr_wizard.BatchCfg(mode="simple"),
         presets_yaml_host="/tmp/presets.yaml",
         presets_yaml_container="/root/.config/mkbrr/presets.yaml",
     )

@@ -53,6 +53,7 @@ requires-python = ">=3.10"
 dependencies = [
     "PyYAML>=6.0",
     "rich>=14.2.0",
+    "jsonschema>=4.0",
 ]
 
 [project.optional-dependencies]

@@ -154,6 +154,52 @@ presets_yaml: ~/.config/mkbrr/presets.yaml
         finally:
             os.unlink(temp_path)
 
+    def test_batch_mode_defaults_to_simple(self, mkbrr_wizard: ModuleType) -> None:
+        yaml_content = """
+runtime: native
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            temp_path = f.name
+
+        try:
+            cfg = mkbrr_wizard.load_config(Path(temp_path))
+            assert cfg.batch.mode == "simple"
+        finally:
+            os.unlink(temp_path)
+
+    def test_batch_mode_advanced_is_loaded(self, mkbrr_wizard: ModuleType) -> None:
+        yaml_content = """
+runtime: native
+batch:
+  mode: advanced
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            temp_path = f.name
+
+        try:
+            cfg = mkbrr_wizard.load_config(Path(temp_path))
+            assert cfg.batch.mode == "advanced"
+        finally:
+            os.unlink(temp_path)
+
+    def test_invalid_batch_mode_raises(self, mkbrr_wizard: ModuleType) -> None:
+        yaml_content = """
+runtime: native
+batch:
+  mode: fast
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            temp_path = f.name
+
+        try:
+            with pytest.raises(ValueError, match="batch.mode must be one of"):
+                mkbrr_wizard.load_config(Path(temp_path))
+        finally:
+            os.unlink(temp_path)
+
 
 class TestDockerRunBase:
     """Tests for docker_run_base command builder."""
@@ -176,6 +222,7 @@ class TestDockerRunBase:
                 container_config_dir="/root/.config/mkbrr",
             ),
             ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
+            batch=mkbrr_wizard.BatchCfg(mode="simple"),
             presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
             presets_yaml_container="/root/.config/mkbrr/presets.yaml",
         )

@@ -5,6 +5,7 @@ An interactive command-line wizard for working with [mkbrr](https://github.com/a
 ## Features
 
 - **Create torrents** from local files/folders using configurable presets
+- **Batch create torrents** with an interactive job builder (`mkbrr create -b`)
 - **Inspect torrents** to view metadata and file structure
 - **Check/verify** local data against existing `.torrent` files
 - Automatic path translation between host and container paths
@@ -91,6 +92,18 @@ presets:
     private: true
 ```
 
+### Batch Mode
+
+Configure batch prompt style in `config.yaml`:
+
+```yaml
+batch:
+  mode: simple
+```
+
+- `simple` (default): asks only preset, job count, content path, and output path.
+- `advanced`: also asks per-job optional fields (`trackers`, `private`, `piece_length`, etc.).
+
 ## Usage
 
 Run the wizard:
@@ -112,6 +125,7 @@ mkbrr-wizard
   [1] Create a torrent from a file/folder   (mkbrr create)
   [2] Inspect an existing .torrent file     (mkbrr inspect)
   [3] Check data against a .torrent file    (mkbrr check)
+  [4] Batch create torrents                 (mkbrr create -b)
   [q] Quit
 ```
 
@@ -140,6 +154,21 @@ mkbrr-wizard
    - **Quiet**: Only show final status/percentage
    - **Workers**: Number of parallel workers (leave empty for automatic)
 5. Confirm to run
+
+### Batch Creating Torrents
+
+1. Select option `4`
+2. Choose a required preset (used for the entire batch run)
+3. Enter how many jobs to build
+4. For each job, provide:
+   - source content path (`path`)
+   - output `.torrent` path (`output`) (press Enter to use `host_output_dir/<content-name>.torrent`)
+5. In `batch.mode: advanced`, the wizard additionally prompts for optional per-job metadata.
+6. The wizard auto-maps paths for the active runtime (native/docker)
+7. The generated batch YAML is validated against the bundled official batch schema before execution
+8. The wizard writes a temporary batch YAML file, runs `mkbrr create -b ...`, then always removes the temp file
+
+Batch mode in this wizard is currently interactive-builder only; importing an existing batch file is not included.
 
 ## Path Handling
 

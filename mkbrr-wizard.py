@@ -23,6 +23,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -47,6 +49,12 @@ try:
     install_rich_traceback(show_locals=False)
 except ImportError as e:
     print("❌ rich is not installed. Install it with:\n   pip install rich")
+    raise SystemExit(1) from e
+
+try:
+    from jsonschema import Draft7Validator
+except ImportError as e:
+    print("❌ jsonschema is not installed. Install it with:\n   pip install jsonschema")
     raise SystemExit(1) from e
 
 try:
@@ -147,6 +155,11 @@ class MkbrrCfg:
 
 
 @dataclass(frozen=True)
+class BatchCfg:
+    mode: str  # simple|advanced
+
+
+@dataclass(frozen=True)
 class AppCfg:
     runtime: str  # auto|docker|native
     docker_support: bool
@@ -156,6 +169,7 @@ class AppCfg:
     mkbrr: MkbrrCfg
     paths: PathsCfg
     ownership: OwnershipCfg
+    batch: BatchCfg
 
     presets_yaml_host: str  # absolute host path to presets.yaml
     presets_yaml_container: str  # container path to presets.yaml (docker runtime)
@@ -215,6 +229,12 @@ def load_config(path: Path) -> AppCfg:
         gid=int(ownership_node.get("gid", 100)),
     )
 
+    batch_node: dict[str, Any] = cast(dict[str, Any], raw.get("batch") or {})
+    batch_mode = str(batch_node.get("mode", "simple")).strip().lower()
+    if batch_mode not in ("simple", "advanced"):
+        raise ValueError("batch.mode must be one of: simple, advanced")
+    batch = BatchCfg(mode=batch_mode)
+
     presets_yaml_raw = str(raw.get("presets_yaml", "presets.yaml")).strip()
 
     # Expand first (handles ~/ and $HOME/ etc)
@@ -237,6 +257,7 @@ def load_config(path: Path) -> AppCfg:
         mkbrr=mkbrr,
         paths=paths,
         ownership=ownership,
+        batch=batch,
         presets_yaml_host=presets_host,
         presets_yaml_container=presets_container,
     )
@@ -369,6 +390,36 @@ def build_create_command(
             cfg.mkbrr.binary,
             "create",
             content_path,
+            "-P",
+            preset,
+            "--preset-file",
+            cfg.presets_yaml_host,
+        ]
+        cwd = cfg.paths.host_output_dir
+    return cmd, cwd
+
+
+def build_batch_create_command(
+    cfg: AppCfg, runtime: str, batch_file_path: str, preset: str
+) -> tuple[list[str], str | None]:
+    """Return (cmd, cwd) for batch create action depending on runtime."""
+    if runtime == "docker":
+        cmd = docker_run_base(cfg, cfg.paths.container_config_dir) + [
+            "create",
+            "-b",
+            batch_file_path,
+            "-P",
+            preset,
+            "--preset-file",
+            cfg.presets_yaml_container,
+        ]
+        cwd = None
+    else:
+        cmd = [
+            cfg.mkbrr.binary,
+            "create",
+            "-b",
+            batch_file_path,
             "-P",
             preset,
             "--preset-file",
@@ -548,6 +599,7 @@ def choose_action() -> str:
         "[cyan][1][/] Create a torrent from a file/folder   [dim](mkbrr create)[/]\n"
         "[cyan][2][/] Inspect an existing .torrent file     [dim](mkbrr inspect)[/]\n"
         "[cyan][3][/] Check data against a .torrent file    [dim](mkbrr check)[/]\n"
+        "[cyan][4][/] Batch create torrents                [dim](mkbrr create -b)[/]\n"
         "[cyan][q][/] Quit",
         title="🧰 Action",
         border_style="cyan",
@@ -555,30 +607,40 @@ def choose_action() -> str:
     )
     console.print(panel)
 
-    choice = cast(str, Prompt.ask("Choose", choices=["1", "2", "3", "q"], default="1"))
+    choice = cast(str, Prompt.ask("Choose", choices=["1", "2", "3", "4", "q"], default="1"))
     if choice == "2":
         return "inspect"
     if choice == "3":
         return "check"
+    if choice == "4":
+        return "batch"
     if choice == "q":
         raise SystemExit(0)
     return "create"
 
 
-def ask_path(prompt: str, history: InMemoryHistory | None = None) -> str:
+def ask_path(
+    prompt: str, history: InMemoryHistory | None = None, default: str | None = None
+) -> str:
     """Ask for a path, with optional ↑/↓ history via prompt_toolkit."""
     if _has_prompt_toolkit and history is not None:
         from prompt_toolkit import PromptSession as PS
 
         session: PS[str] = PS(history=history)
         try:
-            raw = cast(str, session.prompt(f"{prompt}: "))
+            suffix = f" [{default}]" if default else ""
+            raw = cast(str, session.prompt(f"{prompt}{suffix}: "))
         except (EOFError, KeyboardInterrupt) as e:
             raise SystemExit(0) from e
     else:
-        raw = cast(str, Prompt.ask(prompt))
+        if default:
+            raw = cast(str, Prompt.ask(prompt, default=default))
+        else:
+            raw = cast(str, Prompt.ask(prompt))
 
     raw = _clean_user_path(raw)
+    if not raw and default:
+        raw = _clean_user_path(default)
     if not raw:
         console.print("[err]❌ No path provided.[/]")
         raise SystemExit(1)
@@ -624,6 +686,335 @@ def confirm_cmd(cmd: list[str], cwd: str | None = None) -> bool:
     return cast(bool, Confirm.ask("Proceed?", default=True))
 
 
+def _script_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _batch_schema_path() -> Path:
+    return _script_dir() / "schema" / "batch.json"
+
+
+def load_batch_schema() -> dict[str, Any]:
+    schema_path = _batch_schema_path()
+    if not schema_path.exists():
+        raise FileNotFoundError(f"Batch schema not found: {schema_path}")
+
+    loaded = yaml.safe_load(schema_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Batch schema must be a JSON object at: {schema_path}")
+    return cast(dict[str, Any], loaded)
+
+
+def _error_path(path_parts: list[Any]) -> str:
+    if not path_parts:
+        return "root"
+    return ".".join(str(p) for p in path_parts)
+
+
+def validate_batch_payload(payload: dict[str, Any], schema: dict[str, Any]) -> list[str]:
+    validator = Draft7Validator(schema)
+    errors = sorted(validator.iter_errors(payload), key=lambda e: list(e.absolute_path))
+    msgs: list[str] = []
+    for err in errors:
+        path = _error_path(list(err.absolute_path))
+        msgs.append(f"{path}: {err.message}")
+    return msgs
+
+
+def ask_positive_int(prompt: str, default: int = 1) -> int:
+    while True:
+        raw = cast(str, Prompt.ask(prompt, default=str(default))).strip()
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+        console.print("[warn]⚠ Please enter a positive integer.[/]")
+
+
+def ask_csv_list(prompt: str, default: list[str] | None = None) -> list[str] | None:
+    default_text = ",".join(default) if default else ""
+    raw = cast(str, Prompt.ask(prompt, default=default_text)).strip()
+    if not raw:
+        return None
+    values = [x.strip() for x in raw.split(",") if x.strip()]
+    return values or None
+
+
+def ask_optional_int_range(
+    prompt: str, min_value: int, max_value: int, default: int | None = None
+) -> int | None:
+    default_text = str(default) if default is not None else ""
+    raw = cast(str, Prompt.ask(prompt, default=default_text)).strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        console.print(f"[warn]⚠ Invalid number '{raw}'. Skipping.[/]")
+        return None
+    if value < min_value or value > max_value:
+        console.print(f"[warn]⚠ Value must be between {min_value} and {max_value}. Skipping.[/]")
+        return None
+    return value
+
+
+def ask_optional_text(prompt: str, default: str | None = None) -> str | None:
+    default_text = default or ""
+    raw = cast(str, Prompt.ask(prompt, default=default_text)).strip()
+    return raw or None
+
+
+def ask_optional_bool(prompt: str, default: bool | None = None) -> bool | None:
+    default_choice = "skip"
+    if default is True:
+        default_choice = "y"
+    elif default is False:
+        default_choice = "n"
+
+    choice = cast(
+        str,
+        Prompt.ask(
+            f"{prompt} [y/n/skip]",
+            choices=["y", "n", "skip"],
+            default=default_choice,
+        ),
+    )
+    if choice == "skip":
+        return None
+    return choice == "y"
+
+
+def _collect_job_optional_settings(
+    previous: dict[str, Any] | None, job_index: int
+) -> dict[str, Any]:
+    if previous is not None and job_index > 1:
+        if cast(bool, Confirm.ask("Reuse optional settings from previous job?", default=True)):
+            return deepcopy(previous)
+
+    table = Table(title=f"Job {job_index} Optional Settings", show_header=False, box=None)
+    table.add_column("field", style="dim")
+    table.add_column("value")
+    table.add_row("Common", "trackers, private, piece_length, comment, source")
+    table.add_row("Advanced", "no_date, webseeds, exclude_patterns, include_patterns")
+    console.print(table)
+
+    trackers_default = cast(list[str] | None, previous.get("trackers")) if previous else None
+    private_default = cast(bool | None, previous.get("private")) if previous else None
+    piece_length_default = cast(int | None, previous.get("piece_length")) if previous else None
+    comment_default = cast(str | None, previous.get("comment")) if previous else None
+    source_default = cast(str | None, previous.get("source")) if previous else None
+    no_date_default = cast(bool | None, previous.get("no_date")) if previous else None
+    webseeds_default = cast(list[str] | None, previous.get("webseeds")) if previous else None
+    exclude_default = cast(list[str] | None, previous.get("exclude_patterns")) if previous else None
+    include_default = cast(list[str] | None, previous.get("include_patterns")) if previous else None
+
+    result: dict[str, Any] = {}
+
+    trackers = ask_csv_list("Trackers (comma-separated, blank to skip)", default=trackers_default)
+    if trackers is not None:
+        result["trackers"] = trackers
+
+    private = ask_optional_bool("Private torrent?", default=private_default)
+    if private is not None:
+        result["private"] = private
+
+    piece_length = ask_optional_int_range(
+        "Piece length exponent [14-24] (blank to skip)",
+        14,
+        24,
+        default=piece_length_default,
+    )
+    if piece_length is not None:
+        result["piece_length"] = piece_length
+
+    comment = ask_optional_text("Comment (blank to skip)", default=comment_default)
+    if comment is not None:
+        result["comment"] = comment
+
+    source = ask_optional_text("Source (blank to skip)", default=source_default)
+    if source is not None:
+        result["source"] = source
+
+    no_date = ask_optional_bool("Omit creation date (no_date)?", default=no_date_default)
+    if no_date is not None:
+        result["no_date"] = no_date
+
+    webseeds = ask_csv_list("Webseeds (comma-separated, blank to skip)", default=webseeds_default)
+    if webseeds is not None:
+        result["webseeds"] = webseeds
+
+    exclude_patterns = ask_csv_list(
+        "Exclude patterns (comma-separated, blank to skip)",
+        default=exclude_default,
+    )
+    if exclude_patterns is not None:
+        result["exclude_patterns"] = exclude_patterns
+
+    include_patterns = ask_csv_list(
+        "Include patterns (comma-separated, blank to skip)",
+        default=include_default,
+    )
+    if include_patterns is not None:
+        result["include_patterns"] = include_patterns
+
+    return result
+
+
+def _default_batch_output_path(cfg: AppCfg, content_raw: str) -> str:
+    trimmed = content_raw.rstrip("/").rstrip("\\")
+    name = Path(trimmed).name if trimmed else ""
+    suffix = Path(name).suffix if name else ""
+    looks_like_file_ext = bool(suffix) and suffix[1:].isalpha() and len(suffix[1:]) <= 5
+    base = Path(name).stem if looks_like_file_ext else name
+    base = base or "batch-job"
+    return str(Path(cfg.paths.host_output_dir) / f"{base}.torrent")
+
+
+def collect_batch_jobs_interactive_simple(cfg: AppCfg) -> dict[str, Any]:
+    num_jobs = ask_positive_int("How many batch jobs?", default=1)
+    jobs: list[dict[str, Any]] = []
+
+    for idx in range(1, num_jobs + 1):
+        console.rule(f"[accent]Batch Job {idx}[/]")
+        content_raw = ask_path(f"📂 Job {idx} content path", history=_content_history)
+        output_default = _default_batch_output_path(cfg, content_raw)
+        output_raw = ask_path(
+            f"📄 Job {idx} output .torrent path",
+            history=_torrent_history,
+            default=output_default,
+        )
+        jobs.append({"path": content_raw, "output": output_raw})
+
+    return {"version": 1, "jobs": jobs}
+
+
+def collect_batch_jobs_interactive_advanced(cfg: AppCfg) -> dict[str, Any]:
+    num_jobs = ask_positive_int("How many batch jobs?", default=1)
+    jobs: list[dict[str, Any]] = []
+    previous_optional: dict[str, Any] | None = None
+
+    for idx in range(1, num_jobs + 1):
+        console.rule(f"[accent]Batch Job {idx}[/]")
+        content_raw = ask_path(f"📂 Job {idx} content path", history=_content_history)
+        output_default = _default_batch_output_path(cfg, content_raw)
+        output_raw = ask_path(
+            f"📄 Job {idx} output .torrent path",
+            history=_torrent_history,
+            default=output_default,
+        )
+
+        optional = _collect_job_optional_settings(previous_optional, idx)
+        job: dict[str, Any] = {"path": content_raw, "output": output_raw, **optional}
+        jobs.append(job)
+        previous_optional = deepcopy(optional)
+
+    return {"version": 1, "jobs": jobs}
+
+
+def collect_batch_jobs_interactive(cfg: AppCfg) -> dict[str, Any]:
+    if cfg.batch.mode == "advanced":
+        return collect_batch_jobs_interactive_advanced(cfg)
+    return collect_batch_jobs_interactive_simple(cfg)
+
+
+def _is_under_root(path: str, root: str) -> bool:
+    return path == root or path.startswith(root + "/")
+
+
+def map_batch_job_paths(cfg: AppCfg, runtime: str, payload: dict[str, Any]) -> dict[str, Any]:
+    mapped = deepcopy(payload)
+    jobs = mapped.get("jobs")
+    if not isinstance(jobs, list):
+        return mapped
+
+    for idx, raw_job in enumerate(jobs, 1):
+        if not isinstance(raw_job, dict):
+            continue
+        job = cast(dict[str, Any], raw_job)
+
+        original_path = str(job.get("path", "")).strip()
+        mapped_path = (
+            map_content_path(cfg, runtime, original_path) if original_path else original_path
+        )
+        job["path"] = mapped_path
+        if (
+            runtime == "docker"
+            and original_path
+            and mapped_path == original_path
+            and not _is_under_root(original_path, cfg.paths.container_data_root)
+        ):
+            console.print(f"[warn]⚠ Job {idx} path was not remapped for docker: {original_path}[/]")
+
+        original_output = str(job.get("output", "")).strip()
+        mapped_output = original_output
+        if original_output:
+            mapped_output = map_torrent_path(cfg, runtime, original_output)
+            if mapped_output == original_output:
+                content_fallback = map_content_path(cfg, runtime, original_output)
+                if content_fallback != original_output:
+                    mapped_output = content_fallback
+        job["output"] = mapped_output
+
+        if (
+            runtime == "docker"
+            and original_output
+            and mapped_output == original_output
+            and not _is_under_root(original_output, cfg.paths.container_output_dir)
+            and not _is_under_root(original_output, cfg.paths.container_data_root)
+        ):
+            console.print(
+                f"[warn]⚠ Job {idx} output was not remapped for docker: {original_output}[/]"
+            )
+
+    return mapped
+
+
+def write_temp_batch_file(cfg: AppCfg, payload: dict[str, Any]) -> tuple[str, str | None]:
+    config_dir = Path(cfg.paths.host_config_dir)
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".yaml",
+        prefix="mkbrr-batch-",
+        dir=str(config_dir),
+        delete=False,
+    ) as f:
+        yaml.safe_dump(payload, f, sort_keys=False)
+        host_path = f.name
+
+    host_root = cfg.paths.host_config_dir
+    if _is_under_root(host_path, host_root):
+        suffix = host_path[len(host_root) :]
+        container_path = cfg.paths.container_config_dir + suffix
+        return host_path, container_path
+
+    return host_path, None
+
+
+def render_batch_summary(payload: dict[str, Any]) -> None:
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, list):
+        console.print("[warn]⚠ No jobs to summarize.[/]")
+        return
+
+    table = Table(title=f"Batch Jobs ({len(jobs)})", box=box.SIMPLE, show_lines=False)
+    table.add_column("#", style="cyan", justify="right")
+    table.add_column("Path", style="path")
+    table.add_column("Output", style="path")
+
+    for idx, raw_job in enumerate(jobs, 1):
+        if not isinstance(raw_job, dict):
+            continue
+        job = cast(dict[str, Any], raw_job)
+        table.add_row(str(idx), str(job.get("path", "")), str(job.get("output", "")))
+
+    console.print(table)
+
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -631,8 +1022,7 @@ def confirm_cmd(cmd: list[str], cwd: str | None = None) -> bool:
 
 def _default_config_path() -> str:
     """Return default config.yaml path relative to the script's location."""
-    script_dir = Path(__file__).resolve().parent
-    return str(script_dir / "config.yaml")
+    return str(_script_dir() / "config.yaml")
 
 
 def parse_args() -> argparse.Namespace:
@@ -736,6 +1126,64 @@ def main() -> None:
                         maybe_fix_torrent_permissions(cfg)
                     else:
                         console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
+
+            elif action == "batch":
+                preset = pick_preset(cfg)
+                if cfg.batch.mode == "simple":
+                    console.print("[info]Using simple mode (preset-driven).[/]")
+                else:
+                    console.print("[info]Using advanced mode (per-job optional fields).[/]")
+                payload = collect_batch_jobs_interactive(cfg)
+                payload = map_batch_job_paths(cfg, runtime, payload)
+
+                try:
+                    schema = load_batch_schema()
+                except (FileNotFoundError, ValueError) as e:
+                    console.print(f"[err]❌ {e}[/]")
+                    continue
+
+                validation_errors = validate_batch_payload(payload, schema)
+                if validation_errors:
+                    console.print("[err]❌ Batch config failed schema validation:[/]")
+                    for err in validation_errors:
+                        console.print(f"[err]  - {err}[/]")
+                    continue
+
+                host_batch_file: str | None = None
+                try:
+                    host_batch_file, container_batch_file = write_temp_batch_file(cfg, payload)
+                    batch_file_path = host_batch_file
+                    if runtime == "docker":
+                        if not container_batch_file:
+                            console.print(
+                                "[err]❌ Could not map temp batch file to a container path.[/]"
+                            )
+                            continue
+                        batch_file_path = container_batch_file
+
+                    cmd, cwd = build_batch_create_command(cfg, runtime, batch_file_path, preset)
+                    render_batch_summary(payload)
+
+                    if confirm_cmd(cmd, cwd=cwd):
+                        r = subprocess.run(cmd, cwd=cwd, check=False)
+                        if r.returncode == 0:
+                            console.print("[ok]✅ mkbrr batch create finished.[/]")
+                        else:
+                            console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
+                        maybe_fix_torrent_permissions(cfg)
+                finally:
+                    if host_batch_file:
+                        try:
+                            os.unlink(host_batch_file)
+                            console.print(
+                                f"[dim]Removed temporary batch file: {host_batch_file}[/]"
+                            )
+                        except FileNotFoundError:
+                            pass
+                        except PermissionError as e:
+                            console.print(
+                                f"[warn]⚠ Could not remove temp batch file {host_batch_file}: {e}[/]"
+                            )
 
             elif action == "inspect":
                 raw = ask_path("📄 Torrent file path", history=_torrent_history)

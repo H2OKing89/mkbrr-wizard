@@ -30,6 +30,7 @@ class TestMapContentPath:
                 container_config_dir="/root/.config/mkbrr",
             ),
             ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
+            batch=mkbrr_wizard.BatchCfg(mode="simple"),
             presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
             presets_yaml_container="/root/.config/mkbrr/presets.yaml",
         )
@@ -93,6 +94,7 @@ class TestMapTorrentPath:
                 container_config_dir="/root/.config/mkbrr",
             ),
             ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
+            batch=mkbrr_wizard.BatchCfg(mode="simple"),
             presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
             presets_yaml_container="/root/.config/mkbrr/presets.yaml",
         )

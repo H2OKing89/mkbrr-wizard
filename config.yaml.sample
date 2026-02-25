@@ -30,6 +30,12 @@ paths:
 # You can use either an absolute path OR a path relative to host_config_dir
 presets_yaml: presets.yaml
 
+# Batch mode:
+#   simple   = preset-driven prompts (fast)
+#   advanced = includes per-job optional fields
+batch:
+  mode: simple
+
 ownership:
   uid: 99
   gid: 100

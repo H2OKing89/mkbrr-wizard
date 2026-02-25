@@ -20,6 +20,10 @@ def test_choose_action_prompts(mkbrr_wizard: ModuleType, monkeypatch: Any) -> No
     monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", lambda prompt, **k: "3")
     assert mkbrr_wizard.choose_action() == "check"
 
+    # Choose '4' => batch
+    monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", lambda prompt, **k: "4")
+    assert mkbrr_wizard.choose_action() == "batch"
+
     # Choose 'q' => SystemExit
     monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", lambda prompt, **k: "q")
     with pytest.raises(SystemExit):
