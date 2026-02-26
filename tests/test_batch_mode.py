@@ -60,7 +60,16 @@ def _build_main_batch_test_files(
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir()
     presets_yaml = cfg_dir / "presets.yaml"
-    presets_yaml.write_text("presets:\n  btn:\n    announce: https://example.com/announce\n")
+    presets_yaml.write_text(
+        "presets:\n"
+        "  btn:\n"
+        "    trackers:\n"
+        "      - https://example.com/announce\n"
+        "    source: BTN\n"
+        "    private: true\n"
+        "    entropy: true\n"
+        "    comment: Made via mkbrr\n"
+    )
 
     host_data = tmp_path / "data"
     host_data.mkdir()
@@ -178,45 +187,59 @@ def test_map_batch_job_output_uses_content_fallback(
     assert job["output"] == "/data/custom/movie1.torrent"
 
 
-def test_write_temp_batch_file_maps_to_container(mkbrr_wizard: ModuleType, tmp_path: Path) -> None:
-    cfg = _sample_cfg(mkbrr_wizard, tmp_path)
-    payload = {"version": 1, "jobs": [{"output": "/torrentfiles/a.torrent", "path": "/data/a.mkv"}]}
-
-    host_file, container_file = mkbrr_wizard.write_temp_batch_file(cfg, payload)
-
-    assert host_file.startswith(cfg.paths.host_config_dir)
-    assert Path(host_file).exists()
-    assert container_file is not None
-    assert container_file.startswith(cfg.paths.container_config_dir)
-
-    Path(host_file).unlink(missing_ok=True)
-
-
-def test_build_batch_create_command_native_and_docker(
+def test_build_batch_job_create_command_native_and_docker(
     mkbrr_wizard: ModuleType, tmp_path: Path
 ) -> None:
     cfg = _sample_cfg(mkbrr_wizard, tmp_path)
+    native_content = tmp_path / "content.mkv"
+    native_content.write_text("x")
+    native_out = tmp_path / "out.torrent"
+    native_job = {
+        "path": str(native_content),
+        "output": str(native_out),
+        "trackers": ["https://tracker.example/announce"],
+        "private": True,
+        "comment": "note",
+        "source": "BTN",
+        "no_date": False,
+        "entropy": True,
+        "exclude_patterns": ["*.nfo"],
+        "include_patterns": ["*.mkv"],
+    }
 
-    native_cmd, native_cwd = mkbrr_wizard.build_batch_create_command(
+    native_cmd, native_cwd = mkbrr_wizard.build_batch_job_create_command(
         cfg,
         "native",
-        "/tmp/batch.yaml",
         "btn",
+        native_job,
     )
-    assert native_cmd[:3] == ["mkbrr", "create", "-b"]
+    assert native_cmd[:2] == ["mkbrr", "create"]
+    assert "-b" not in native_cmd
     assert "-P" in native_cmd
-    assert "--preset-file" in native_cmd
+    assert "--output-dir" in native_cmd
+    assert "--tracker" in native_cmd
+    assert "--private" in native_cmd
+    assert "--no-date" not in native_cmd
+    assert "--entropy" in native_cmd
     assert native_cwd == cfg.paths.host_output_dir
 
-    docker_cmd, docker_cwd = mkbrr_wizard.build_batch_create_command(
+    docker_content = tmp_path / "docker-content.mkv"
+    docker_content.write_text("x")
+    docker_out = tmp_path / "docker-out.torrent"
+
+    docker_cmd, docker_cwd = mkbrr_wizard.build_batch_job_create_command(
         cfg,
         "docker",
-        "/root/.config/mkbrr/batch.yaml",
         "btn",
+        {
+            "path": str(docker_content),
+            "output": str(docker_out),
+        },
     )
     assert docker_cmd[0] == "docker"
-    assert "-b" in docker_cmd
+    assert "-b" not in docker_cmd
     assert "-P" in docker_cmd
+    assert "--output-dir" in docker_cmd
     assert docker_cwd is None
 
 
@@ -302,6 +325,7 @@ def test_collect_batch_jobs_interactive_advanced_includes_optional(
                 "18",
                 "comment",
                 "source",
+                "y",
                 "n",
                 "https://seed.example/file",
                 "*.nfo",
@@ -320,6 +344,7 @@ def test_collect_batch_jobs_interactive_advanced_includes_optional(
         "piece_length": 18,
         "comment": "comment",
         "source": "source",
+        "entropy": True,
         "no_date": False,
         "webseeds": ["https://seed.example/file"],
         "exclude_patterns": ["*.nfo"],
@@ -372,14 +397,14 @@ def test_main_batch_success_native(tmp_path, mkbrr_wizard: ModuleType, monkeypat
     cmd, _ = calls[0]
     assert cmd[0] == "mkbrr"
     assert cmd[1] == "create"
-    assert "-b" in cmd
-    batch_file = cmd[cmd.index("-b") + 1]
-    assert not Path(batch_file).exists()
+    assert "-b" not in cmd
+    assert "-P" in cmd
+    assert "--output-dir" in cmd
     assert chown_called["count"] == 1
 
 
 def test_main_batch_success_docker(tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:
-    config_yaml, cfg_dir, _, _, _, content, output = _build_main_batch_test_files(
+    config_yaml, _, _, _, _, content, output = _build_main_batch_test_files(
         tmp_path, runtime="auto", docker_support=True
     )
 
@@ -428,9 +453,9 @@ def test_main_batch_success_docker(tmp_path, mkbrr_wizard: ModuleType, monkeypat
     assert len(calls) == 1
     cmd = calls[0]
     assert cmd[0] == "docker"
-    assert "-b" in cmd
-    assert cmd[cmd.index("-b") + 1].startswith("/root/.config/mkbrr/mkbrr-batch-")
-    assert not list(cfg_dir.glob("mkbrr-batch-*.yaml"))
+    assert "-b" not in cmd
+    assert "-P" in cmd
+    assert "--output-dir" in cmd
     assert chown_called["count"] == 1
 
 
@@ -460,6 +485,7 @@ def test_main_batch_success_advanced_mode_prompts_optional(
                 "",  # piece_length
                 "",  # comment
                 "",  # source
+                "skip",  # entropy
                 "skip",  # no_date
                 "",  # webseeds
                 "",  # exclude_patterns
@@ -503,12 +529,14 @@ def test_main_batch_validation_failure_skips_execution(
     monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")
     monkeypatch.setattr(mkbrr_wizard, "_has_prompt_toolkit", False)
     monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", _Seq(["4", "1", "q"]))
+    out_a = tmp_path / "a.torrent"
+    in_a = tmp_path / "a.mkv"
     monkeypatch.setattr(
         mkbrr_wizard,
         "collect_batch_jobs_interactive",
         lambda cfg: {
             "version": 1,
-            "jobs": [{"output": "/tmp/a.torrent", "path": "/tmp/a.mkv", "piece_length": 30}],
+            "jobs": [{"output": str(out_a), "path": str(in_a), "piece_length": 30}],
         },
     )
 
@@ -535,11 +563,16 @@ def test_main_batch_nonzero_exit_skips_chown(
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
     monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")
     monkeypatch.setattr(mkbrr_wizard, "_has_prompt_toolkit", False)
-    monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", _Seq(["4", "1"]))
+    monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", _Seq(["4", "1", "q"]))
+    out_a = tmp_path / "a.torrent"
+    in_a = tmp_path / "a.mkv"
     monkeypatch.setattr(
         mkbrr_wizard,
         "collect_batch_jobs_interactive",
-        lambda cfg: {"version": 1, "jobs": [{"output": "/tmp/a.torrent", "path": "/tmp/a.mkv"}]},
+        lambda cfg: {
+            "version": 1,
+            "jobs": [{"output": str(out_a), "path": str(in_a)}],
+        },
     )
     monkeypatch.setattr(mkbrr_wizard.Confirm, "ask", _Seq([True, False]))  # proceed, do another
 
@@ -560,28 +593,169 @@ def test_main_batch_nonzero_exit_skips_chown(
     assert chown_called["count"] == 0
 
 
-def test_main_batch_cancel_removes_temp_file(
+def test_main_batch_continue_on_error_and_chown_once(
     tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
 ) -> None:
-    config_yaml, cfg_dir, _, _, _, _, _ = _build_main_batch_test_files(
+    config_yaml, _, _, _, _, _, _ = _build_main_batch_test_files(
         tmp_path, runtime="native", docker_support=False
     )
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
     monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")
     monkeypatch.setattr(mkbrr_wizard, "_has_prompt_toolkit", False)
-    monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", _Seq(["4", "1"]))
+    monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", _Seq(["4", "1", "q"]))
+    out_a = tmp_path / "a.torrent"
+    in_a = tmp_path / "a.mkv"
+    out_b = tmp_path / "b.torrent"
+    in_b = tmp_path / "b.mkv"
     monkeypatch.setattr(
         mkbrr_wizard,
         "collect_batch_jobs_interactive",
-        lambda cfg: {"version": 1, "jobs": [{"output": "/tmp/a.torrent", "path": "/tmp/a.mkv"}]},
+        lambda cfg: {
+            "version": 1,
+            "jobs": [
+                {"output": str(out_a), "path": str(in_a)},
+                {"output": str(out_b), "path": str(in_b)},
+            ],
+        },
     )
-    monkeypatch.setattr(mkbrr_wizard.Confirm, "ask", _Seq([False, False]))  # cancel run, do another
+    monkeypatch.setattr(mkbrr_wizard.Confirm, "ask", _Seq([True, False]))  # proceed, do another
+
+    class Dummy:
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+    run_codes = [2, 0]
+    calls = {"count": 0}
+
+    def fake_run(*args, **kwargs):
+        if not run_codes:
+            raise AssertionError("Unexpected subprocess call")
+        calls["count"] += 1
+        return Dummy(run_codes.pop(0))
+
+    monkeypatch.setattr(mkbrr_wizard.subprocess, "run", fake_run)
+
+    chown_called = {"count": 0}
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "maybe_fix_torrent_permissions",
+        lambda cfg: chown_called.__setitem__("count", chown_called["count"] + 1),
+    )
+
+    mkbrr_wizard.main()
+    assert calls["count"] == 2
+    assert not run_codes
+    assert chown_called["count"] == 1
+
+
+def test_main_batch_timeout_marks_failed_and_continues(
+    tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
+) -> None:
+    config_yaml, _, _, _, _, _, _ = _build_main_batch_test_files(
+        tmp_path, runtime="native", docker_support=False
+    )
+
+    monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
+    monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")
+    monkeypatch.setattr(mkbrr_wizard, "_has_prompt_toolkit", False)
+    monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", _Seq(["4", "1", "q"]))
+
+    out_a = tmp_path / "a.torrent"
+    in_a = tmp_path / "a.mkv"
+    out_b = tmp_path / "b.torrent"
+    in_b = tmp_path / "b.mkv"
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "collect_batch_jobs_interactive",
+        lambda cfg: {
+            "version": 1,
+            "jobs": [
+                {"output": str(out_a), "path": str(in_a)},
+                {"output": str(out_b), "path": str(in_b)},
+            ],
+        },
+    )
+    monkeypatch.setattr(mkbrr_wizard.Confirm, "ask", _Seq([True, False]))
+
+    timeout_exc = mkbrr_wizard.subprocess.TimeoutExpired(cmd=["mkbrr"], timeout=1)
+    calls = {"count": 0}
+
+    class Dummy:
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+    def fake_run(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise timeout_exc
+        return Dummy(0)
+
+    monkeypatch.setattr(mkbrr_wizard.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "load_config",
+        lambda path: mkbrr_wizard.AppCfg(
+            runtime="native",
+            docker_support=False,
+            chown=True,
+            docker_user=None,
+            mkbrr=mkbrr_wizard.MkbrrCfg(binary="mkbrr", image="ghcr.io/autobrr/mkbrr"),
+            paths=mkbrr_wizard.PathsCfg(
+                host_data_root=str(tmp_path / "data"),
+                container_data_root="/data",
+                host_output_dir=str(tmp_path / "torrents"),
+                container_output_dir="/torrentfiles",
+                host_config_dir=str(tmp_path / "cfg"),
+                container_config_dir="/root/.config/mkbrr",
+            ),
+            ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
+            batch=mkbrr_wizard.BatchCfg(mode="simple", job_timeout_seconds=1),
+            presets_yaml_host=str(tmp_path / "cfg" / "presets.yaml"),
+            presets_yaml_container="/root/.config/mkbrr/presets.yaml",
+        ),
+    )
+
+    chown_called = {"count": 0}
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "maybe_fix_torrent_permissions",
+        lambda cfg: chown_called.__setitem__("count", chown_called["count"] + 1),
+    )
+
+    mkbrr_wizard.main()
+
+    assert calls["count"] == 2
+    assert chown_called["count"] == 1
+
+
+def test_main_batch_cancel_skips_execution(
+    tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
+) -> None:
+    config_yaml, _, _, _, _, _, _ = _build_main_batch_test_files(
+        tmp_path, runtime="native", docker_support=False
+    )
+
+    monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
+    monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")
+    monkeypatch.setattr(mkbrr_wizard, "_has_prompt_toolkit", False)
+    monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", _Seq(["4", "1", "q"]))
+    out_a = tmp_path / "a.torrent"
+    in_a = tmp_path / "a.mkv"
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "collect_batch_jobs_interactive",
+        lambda cfg: {
+            "version": 1,
+            "jobs": [{"output": str(out_a), "path": str(in_a)}],
+        },
+    )
+    monkeypatch.setattr(mkbrr_wizard.Confirm, "ask", _Seq([False]))  # cancel run
 
     def raise_on_run(*args, **kwargs):
         raise AssertionError("subprocess.run should not be called")
 
     monkeypatch.setattr(mkbrr_wizard.subprocess, "run", raise_on_run)
 
-    mkbrr_wizard.main()
-    assert not list(cfg_dir.glob("mkbrr-batch-*.yaml"))
+    with pytest.raises(SystemExit):
+        mkbrr_wizard.main()

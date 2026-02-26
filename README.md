@@ -5,7 +5,7 @@ An interactive command-line wizard for working with [mkbrr](https://github.com/a
 ## Features
 
 - **Create torrents** from local files/folders using configurable presets
-- **Batch create torrents** with an interactive job builder (`mkbrr create -b`)
+- **Batch create torrents** with an interactive job builder (runs per-job `mkbrr create`)
 - **Inspect torrents** to view metadata and file structure
 - **Check/verify** local data against existing `.torrent` files
 - Automatic path translation between host and container paths
@@ -25,11 +25,13 @@ An interactive command-line wizard for working with [mkbrr](https://github.com/a
 ## Installation
 
 1. Clone or download this repository:
+
    ```bash
    git clone https://github.com/H2OKing89/mkbrr-wizard /mnt/cache/scripts/mkbrr-wizard
    ```
 
 2. Install the required Python dependencies (recommended):
+
    ```bash
    pip install -r requirements.txt
    ```
@@ -37,29 +39,37 @@ An interactive command-line wizard for working with [mkbrr](https://github.com/a
    Optional extras:
 
    - UI enhancements: `prompt_toolkit` — install with:
+
      ```bash
      pip install prompt_toolkit
      ```
+
      or if you prefer editable install with extras:
+
      ```bash
      pip install -e .[ui]
      ```
 
    - Developer tools (for testing/linting/formatting):
+
      ```bash
      pip install -e .[dev]
      ```
+
      or via requirements file:
+
      ```bash
      pip install -r requirements-dev.txt
      ```
 
 3. Make the script executable:
+
    ```bash
    chmod +x /mnt/cache/scripts/mkbrr-wizard/mkbrr-wizard.py
    ```
 
 4. (Optional) Create a symbolic link for easier access:
+
    ```bash
    ln -s /mnt/cache/scripts/mkbrr-wizard/mkbrr-wizard.py /usr/local/bin/mkbrr-wizard
    ```
@@ -69,7 +79,7 @@ An interactive command-line wizard for working with [mkbrr](https://github.com/a
 The wizard uses hardcoded paths that are designed for Unraid systems. You may need to adjust these in the script:
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+| -------- | ------- | ----------- |
 | `HOST_DATA_ROOT` | `/mnt/user/data` | Host path for data files |
 | `CONTAINER_DATA_ROOT` | `/data` | Container mount point for data |
 | `HOST_OUTPUT_DIR` | `/mnt/user/data/downloads/torrents/torrentfiles` | Where `.torrent` files are saved |
@@ -120,12 +130,12 @@ mkbrr-wizard
 
 ### Main Menu
 
-```
+```text
 🧰 What do you want to do?
   [1] Create a torrent from a file/folder   (mkbrr create)
   [2] Inspect an existing .torrent file     (mkbrr inspect)
   [3] Check data against a .torrent file    (mkbrr check)
-  [4] Batch create torrents                 (mkbrr create -b)
+  [4] Batch create torrents                 (mkbrr create per-job)
   [q] Quit
 ```
 
@@ -165,17 +175,18 @@ mkbrr-wizard
    - output `.torrent` path (`output`) (press Enter to use `host_output_dir/<content-name>.torrent`)
 5. In `batch.mode: advanced`, the wizard additionally prompts for optional per-job metadata.
 6. The wizard auto-maps paths for the active runtime (native/docker)
-7. The generated batch YAML is validated against the bundled official batch schema before execution
-8. The wizard writes a temporary batch YAML file, runs `mkbrr create -b ...`, then always removes the temp file
+7. The generated batch payload is validated against the bundled schema before execution
+8. The wizard executes each job as its own `mkbrr create` command, continuing through failures
+9. A final results table is printed with per-job exit codes; permission fix runs once at end if any job succeeded
 
-Batch mode in this wizard is currently interactive-builder only; importing an existing batch file is not included.
+Batch mode in this wizard is interactive-builder only; importing an existing batch file is not included.
 
 ## Path Handling
 
 The wizard automatically translates between host paths and container paths:
 
 | Host Path | Container Path |
-|-----------|----------------|
+| ----------- | ---------------- |
 | `/mnt/user/data/downloads/file.mkv` | `/data/downloads/file.mkv` |
 | `/mnt/user/data/downloads/torrents/torrentfiles/example.torrent` | `/torrentfiles/example.torrent` |
 
@@ -183,7 +194,7 @@ You can enter either format — the wizard will convert as needed.
 
 ## Example Session
 
-```
+```text
 ==========================================
   🧙 mkbrr Helper – Torrent Creator Wizard
 ==========================================

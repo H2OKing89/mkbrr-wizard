@@ -24,7 +24,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -158,6 +157,7 @@ class MkbrrCfg:
 @dataclass(frozen=True)
 class BatchCfg:
     mode: str  # simple|advanced
+    job_timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -234,7 +234,16 @@ def load_config(path: Path) -> AppCfg:
     batch_mode = str(batch_node.get("mode", "simple")).strip().lower()
     if batch_mode not in ("simple", "advanced"):
         raise ValueError("batch.mode must be one of: simple, advanced")
-    batch = BatchCfg(mode=batch_mode)
+
+    timeout_raw = batch_node.get("job_timeout_seconds")
+    job_timeout_seconds: int | None = None
+    if timeout_raw is not None:
+        timeout_val = int(timeout_raw)
+        if timeout_val <= 0:
+            raise ValueError("batch.job_timeout_seconds must be a positive integer")
+        job_timeout_seconds = timeout_val
+
+    batch = BatchCfg(mode=batch_mode, job_timeout_seconds=job_timeout_seconds)
 
     presets_yaml_raw = str(raw.get("presets_yaml", "presets.yaml")).strip()
 
@@ -400,34 +409,83 @@ def build_create_command(
     return cmd, cwd
 
 
-def build_batch_create_command(
-    cfg: AppCfg, runtime: str, batch_file_path: str, preset: str
+def _append_bool_flag(cmd: list[str], flag: str, *, value: bool) -> None:
+    if value:
+        cmd.append(flag)
+
+
+def build_batch_job_create_command(
+    cfg: AppCfg, runtime: str, preset: str, job: dict[str, Any]
 ) -> tuple[list[str], str | None]:
-    """Return (cmd, cwd) for batch create action depending on runtime."""
-    if runtime == "docker":
-        cmd = [
-            *docker_run_base(cfg, cfg.paths.container_config_dir),
-            "create",
-            "-b",
-            batch_file_path,
-            "-P",
-            preset,
-            "--preset-file",
-            cfg.presets_yaml_container,
-        ]
-        cwd = None
-    else:
-        cmd = [
-            cfg.mkbrr.binary,
-            "create",
-            "-b",
-            batch_file_path,
-            "-P",
-            preset,
-            "--preset-file",
-            cfg.presets_yaml_host,
-        ]
-        cwd = cfg.paths.host_output_dir
+    """Return (cmd, cwd) for a single batch job executed via mkbrr create."""
+    content_path = str(job.get("path", "")).strip()
+    output_path = str(job.get("output", "")).strip()
+    if not output_path:
+        raise ValueError("Batch job output path cannot be empty")
+
+    cmd, cwd = build_create_command(cfg, runtime, content_path, preset)
+    output_dir = str(Path(output_path).parent)
+    cmd += ["--output-dir", output_dir]
+
+    trackers = job.get("trackers")
+    if isinstance(trackers, list):
+        for tracker in trackers:
+            tracker_text = str(tracker).strip()
+            if tracker_text:
+                cmd += ["--tracker", tracker_text]
+
+    webseeds = job.get("webseeds")
+    if isinstance(webseeds, list):
+        for seed in webseeds:
+            seed_text = str(seed).strip()
+            if seed_text:
+                cmd += ["--web-seed", seed_text]
+
+    if isinstance(job.get("private"), bool):
+        _append_bool_flag(cmd, "--private", value=job["private"])
+
+    if isinstance(job.get("no_date"), bool):
+        _append_bool_flag(cmd, "--no-date", value=job["no_date"])
+
+    if isinstance(job.get("entropy"), bool):
+        _append_bool_flag(cmd, "--entropy", value=job["entropy"])
+
+    if isinstance(job.get("skip_prefix"), bool):
+        _append_bool_flag(cmd, "--skip-prefix", value=job["skip_prefix"])
+
+    if isinstance(job.get("fail_on_season_warning"), bool):
+        _append_bool_flag(
+            cmd,
+            "--fail-on-season-warning",
+            value=job["fail_on_season_warning"],
+        )
+
+    piece_length = job.get("piece_length")
+    if isinstance(piece_length, int):
+        cmd += ["--piece-length", str(piece_length)]
+
+    comment = str(job.get("comment", "")).strip()
+    if comment:
+        cmd += ["--comment", comment]
+
+    source = str(job.get("source", "")).strip()
+    if source:
+        cmd += ["--source", source]
+
+    exclude_patterns = job.get("exclude_patterns")
+    if isinstance(exclude_patterns, list):
+        for pattern in exclude_patterns:
+            pattern_text = str(pattern).strip()
+            if pattern_text:
+                cmd += ["--exclude", pattern_text]
+
+    include_patterns = job.get("include_patterns")
+    if isinstance(include_patterns, list):
+        for pattern in include_patterns:
+            pattern_text = str(pattern).strip()
+            if pattern_text:
+                cmd += ["--include", pattern_text]
+
     return cmd, cwd
 
 
@@ -601,7 +659,7 @@ def choose_action() -> str:
         "[cyan][1][/] Create a torrent from a file/folder   [dim](mkbrr create)[/]\n"
         "[cyan][2][/] Inspect an existing .torrent file     [dim](mkbrr inspect)[/]\n"
         "[cyan][3][/] Check data against a .torrent file    [dim](mkbrr check)[/]\n"
-        "[cyan][4][/] Batch create torrents                [dim](mkbrr create -b)[/]\n"
+        "[cyan][4][/] Batch create torrents                [dim](mkbrr create per-job)[/]\n"
         "[cyan][q][/] Quit",
         title="🧰 Action",
         border_style="cyan",
@@ -803,7 +861,7 @@ def _collect_job_optional_settings(
     table.add_column("field", style="dim")
     table.add_column("value")
     table.add_row("Common", "trackers, private, piece_length, comment, source")
-    table.add_row("Advanced", "no_date, webseeds, exclude_patterns, include_patterns")
+    table.add_row("Advanced", "entropy, no_date, webseeds, exclude_patterns, include_patterns")
     console.print(table)
 
     trackers_default = cast(list[str] | None, previous.get("trackers")) if previous else None
@@ -811,6 +869,7 @@ def _collect_job_optional_settings(
     piece_length_default = cast(int | None, previous.get("piece_length")) if previous else None
     comment_default = cast(str | None, previous.get("comment")) if previous else None
     source_default = cast(str | None, previous.get("source")) if previous else None
+    entropy_default = cast(bool | None, previous.get("entropy")) if previous else None
     no_date_default = cast(bool | None, previous.get("no_date")) if previous else None
     webseeds_default = cast(list[str] | None, previous.get("webseeds")) if previous else None
     exclude_default = cast(list[str] | None, previous.get("exclude_patterns")) if previous else None
@@ -842,6 +901,10 @@ def _collect_job_optional_settings(
     source = ask_optional_text("Source (blank to skip)", default=source_default)
     if source is not None:
         result["source"] = source
+
+    entropy = ask_optional_bool("Randomize info hash (entropy)?", default=entropy_default)
+    if entropy is not None:
+        result["entropy"] = entropy
 
     no_date = ask_optional_bool("Omit creation date (no_date)?", default=no_date_default)
     if no_date is not None:
@@ -975,30 +1038,6 @@ def map_batch_job_paths(cfg: AppCfg, runtime: str, payload: dict[str, Any]) -> d
             )
 
     return mapped
-
-
-def write_temp_batch_file(cfg: AppCfg, payload: dict[str, Any]) -> tuple[str, str | None]:
-    config_dir = Path(cfg.paths.host_config_dir)
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        suffix=".yaml",
-        prefix="mkbrr-batch-",
-        dir=str(config_dir),
-        delete=False,
-    ) as f:
-        yaml.safe_dump(payload, f, sort_keys=False)
-        host_path = f.name
-
-    host_root = cfg.paths.host_config_dir
-    if _is_under_root(host_path, host_root):
-        suffix = host_path[len(host_root) :]
-        container_path = cfg.paths.container_config_dir + suffix
-        return host_path, container_path
-
-    return host_path, None
 
 
 def render_batch_summary(payload: dict[str, Any]) -> None:
@@ -1155,47 +1194,102 @@ def main() -> None:
                         console.print(f"[err]  - {err}[/]")
                     continue
 
-                host_batch_file: str | None = None
-                container_batch_file: str | None = None
-                try:
-                    host_batch_file, container_batch_file = write_temp_batch_file(cfg, payload)
-                except OSError as e:
-                    console.print(f"[err]❌ Could not write temporary batch file: {e}[/]")
+                jobs = payload.get("jobs")
+                if not isinstance(jobs, list) or not jobs:
+                    console.print("[err]❌ No valid jobs found after validation.[/]")
                     continue
 
+                typed_jobs: list[dict[str, Any]] = [
+                    cast(dict[str, Any], job) for job in jobs if isinstance(job, dict)
+                ]
+                if not typed_jobs:
+                    console.print("[err]❌ No valid job objects found after validation.[/]")
+                    continue
+
+                render_batch_summary(payload)
+
                 try:
-                    batch_file_path = host_batch_file
-                    if runtime == "docker":
-                        if not container_batch_file:
-                            console.print(
-                                "[err]❌ Could not map temp batch file to a container path.[/]"
-                            )
-                            continue
-                        batch_file_path = container_batch_file
+                    preview_cmd, preview_cwd = build_batch_job_create_command(
+                        cfg, runtime, preset, typed_jobs[0]
+                    )
+                except ValueError as e:
+                    console.print(f"[err]❌ Invalid batch job: {e}[/]")
+                    continue
+                console.print(
+                    f"[info]About to run {len(typed_jobs)} batch job(s). Showing first job command preview.[/]"
+                )
+                if not confirm_cmd(preview_cmd, cwd=preview_cwd):
+                    continue
 
-                    cmd, cwd = build_batch_create_command(cfg, runtime, batch_file_path, preset)
-                    render_batch_summary(payload)
+                succeeded = 0
+                failed = 0
+                result_rows: list[tuple[int, str, str, int]] = []
 
-                    if confirm_cmd(cmd, cwd=cwd):
-                        r = subprocess.run(cmd, cwd=cwd, check=False)
+                for idx, job in enumerate(typed_jobs, 1):
+                    output_path = str(job.get("output", "")).strip()
+                    content_path = str(job.get("path", "")).strip()
+                    try:
+                        cmd, cwd = build_batch_job_create_command(cfg, runtime, preset, job)
+                    except ValueError as e:
+                        failed += 1
+                        result_rows.append((idx, content_path, output_path, 2))
+                        console.print(f"[err]❌ Job {idx} invalid: {e}[/]")
+                        continue
+
+                    try:
+                        r = subprocess.run(
+                            cmd,
+                            cwd=cwd,
+                            check=False,
+                            timeout=cfg.batch.job_timeout_seconds,
+                        )
+                        result_rows.append((idx, content_path, output_path, r.returncode))
+
                         if r.returncode == 0:
-                            console.print("[ok]✅ mkbrr batch create finished.[/]")
-                            maybe_fix_torrent_permissions(cfg)
+                            succeeded += 1
                         else:
-                            console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
-                finally:
-                    if host_batch_file:
-                        try:
-                            os.unlink(host_batch_file)
+                            failed += 1
                             console.print(
-                                f"[dim]Removed temporary batch file: {host_batch_file}[/]"
+                                f"[err]❌ Job {idx} failed with exit code {r.returncode}[/]"
                             )
-                        except FileNotFoundError:
-                            pass
-                        except PermissionError as e:
-                            console.print(
-                                f"[warn]⚠ Could not remove temp batch file {host_batch_file}: {e}[/]"
-                            )
+                    except subprocess.TimeoutExpired:
+                        failed += 1
+                        result_rows.append((idx, content_path, output_path, 124))
+                        timeout_msg = (
+                            f" after {cfg.batch.job_timeout_seconds}s"
+                            if cfg.batch.job_timeout_seconds is not None
+                            else ""
+                        )
+                        console.print(f"[err]❌ Job {idx} timed out{timeout_msg}[/]")
+
+                results_table = Table(
+                    title=f"Batch Results (success={succeeded}, failed={failed})",
+                    box=box.SIMPLE,
+                    show_lines=False,
+                )
+                results_table.add_column("#", style="cyan", justify="right")
+                results_table.add_column("Path", style="path")
+                results_table.add_column("Output", style="path")
+                results_table.add_column("Code", justify="right")
+
+                for idx, content_path, output_path, code in result_rows:
+                    code_style = "ok" if code == 0 else "err"
+                    results_table.add_row(
+                        str(idx),
+                        content_path,
+                        output_path,
+                        f"[{code_style}]{code}[/]",
+                    )
+
+                console.print(results_table)
+
+                if succeeded > 0:
+                    console.print(
+                        f"[ok]✅ mkbrr batch create completed with {succeeded} successful job(s).[/]"
+                    )
+                    maybe_fix_torrent_permissions(cfg)
+                else:
+                    console.print("[err]❌ mkbrr batch create failed for all jobs.[/]")
 
             elif action == "inspect":
                 raw = ask_path("📄 Torrent file path", history=_torrent_history)

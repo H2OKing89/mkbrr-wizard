@@ -28,10 +28,12 @@
         "properties": {
           "output": {
             "type": "string",
+            "minLength": 1,
             "description": "Output path for .torrent file"
           },
           "path": {
             "type": "string",
+            "minLength": 1,
             "description": "Path to source file/directory"
           },
           "trackers": {
@@ -72,6 +74,11 @@
           "no_date": {
             "type": "boolean",
             "description": "Don't write creation date",
+            "default": false
+          },
+          "entropy": {
+            "type": "boolean",
+            "description": "Randomize info hash by adding entropy field",
             "default": false
           },
           "exclude_patterns": {
