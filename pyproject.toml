@@ -54,6 +54,8 @@ dependencies = [
     "PyYAML>=6.0",
     "rich>=14.2.0",
     "jsonschema>=4.0",
+    "httpx[http2]>=0.28",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]

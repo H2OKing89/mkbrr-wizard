@@ -18,6 +18,7 @@ Key points:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -25,6 +26,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,6 +73,21 @@ except ImportError:
     _torrent_history = None
     _has_prompt_toolkit = False
 
+try:
+    import httpx
+
+    _has_httpx = True
+except ImportError:
+    httpx = None  # type: ignore[assignment]
+    _has_httpx = False
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()  # loads .env from cwd automatically
+except ImportError:
+    pass  # python-dotenv is optional
+
 
 THEME = Theme(
     {
@@ -105,6 +123,14 @@ def _coerce_bool(v: Any, default: bool) -> bool:
         if s in ("false", "no", "n", "0", "off", "disabled"):
             return False
     return default
+
+
+def _expand_env(s: str) -> str:
+    """Expand $VARS / ${VAR} in a string without Path normalization (for URLs, tokens)."""
+    s = (s or "").strip()
+    if not s:
+        return s
+    return os.path.expandvars(s)
 
 
 def _expand_path(p: str) -> str:
@@ -171,6 +197,43 @@ class UnraidCfg:
 
 
 @dataclass(frozen=True)
+class WorkersCfg:
+    hdd: int | None = 1  # --workers value for spinning disks (None = auto)
+    ssd: int | None = None  # --workers value for SSDs/NVMe (None = auto)
+    default: int | None = None  # fallback when storage type can't be determined
+
+
+@dataclass(frozen=True)
+class PushoverCfg:
+    enabled: bool = False
+    app_token: str = ""
+    user_key: str = ""
+    priority: int = 0  # -2 to 2
+    failure_priority: int = 1
+    device: str = ""
+
+
+@dataclass(frozen=True)
+class DiscordCfg:
+    enabled: bool = False
+    webhook_url: str = ""
+    username: str = "mkbrr-wizard"
+    avatar_url: str = ""
+    color_success: int = 0x2ECC71
+    color_failure: int = 0xE74C3C
+    color_partial: int = 0xF39C12
+
+
+@dataclass(frozen=True)
+class NotificationsCfg:
+    enabled: bool = False
+    policy: str = "summary"  # summary|failures_only|off
+    pushover: PushoverCfg = field(default_factory=PushoverCfg)
+    discord: DiscordCfg = field(default_factory=DiscordCfg)
+    timeout_seconds: int = 10
+
+
+@dataclass(frozen=True)
 class AppCfg:
     runtime: str  # auto|docker|native
     docker_support: bool
@@ -185,6 +248,8 @@ class AppCfg:
     presets_yaml_host: str  # absolute host path to presets.yaml
     presets_yaml_container: str  # container path to presets.yaml (docker runtime)
     unraid: UnraidCfg = field(default_factory=UnraidCfg)
+    notifications: NotificationsCfg = field(default_factory=NotificationsCfg)
+    workers: WorkersCfg = field(default_factory=WorkersCfg)
 
 
 def load_config(path: Path) -> AppCfg:
@@ -289,6 +354,77 @@ def load_config(path: Path) -> AppCfg:
     # In docker, we expect presets.yaml to be available under container_config_dir
     presets_container = str(Path(paths.container_config_dir) / Path(presets_host).name)
 
+    # ---- notifications ----
+    notif_node: dict[str, Any] = cast(dict[str, Any], raw.get("notifications") or {})
+    notif_enabled = _coerce_bool(notif_node.get("enabled", False), False)
+
+    notif_policy = str(notif_node.get("policy", "summary")).strip().lower()
+    if notif_policy not in ("summary", "failures_only", "off"):
+        raise ValueError("notifications.policy must be one of: summary, failures_only, off")
+
+    po_node: dict[str, Any] = cast(dict[str, Any], notif_node.get("pushover") or {})
+    pushover = PushoverCfg(
+        enabled=_coerce_bool(po_node.get("enabled", False), False),
+        app_token=_expand_env(str(po_node.get("app_token", ""))),
+        user_key=_expand_env(str(po_node.get("user_key", ""))),
+        priority=int(po_node.get("priority", 0)),
+        failure_priority=int(po_node.get("failure_priority", 1)),
+        device=str(po_node.get("device", "")).strip(),
+    )
+
+    dc_node: dict[str, Any] = cast(dict[str, Any], notif_node.get("discord") or {})
+    discord_color_success = dc_node.get("color_success", 0x2ECC71)
+    discord_color_failure = dc_node.get("color_failure", 0xE74C3C)
+    discord_color_partial = dc_node.get("color_partial", 0xF39C12)
+    # Handle hex strings from YAML (0x... is parsed as string by YAML)
+    if isinstance(discord_color_success, str):
+        discord_color_success = int(discord_color_success, 0)
+    if isinstance(discord_color_failure, str):
+        discord_color_failure = int(discord_color_failure, 0)
+    if isinstance(discord_color_partial, str):
+        discord_color_partial = int(discord_color_partial, 0)
+
+    discord = DiscordCfg(
+        enabled=_coerce_bool(dc_node.get("enabled", False), False),
+        webhook_url=_expand_env(str(dc_node.get("webhook_url", ""))),
+        username=str(dc_node.get("username", "mkbrr-wizard")).strip(),
+        avatar_url=str(dc_node.get("avatar_url", "")).strip(),
+        color_success=int(discord_color_success),
+        color_failure=int(discord_color_failure),
+        color_partial=int(discord_color_partial),
+    )
+
+    notifications = NotificationsCfg(
+        enabled=notif_enabled,
+        policy=notif_policy,
+        pushover=pushover,
+        discord=discord,
+        timeout_seconds=int(notif_node.get("timeout_seconds", 10)),
+    )
+
+    # ---- workers auto-tune ----
+    workers_node: dict[str, Any] = cast(dict[str, Any], raw.get("workers") or {})
+
+    def _parse_workers_val(v: Any, field_name: str) -> int | None:
+        if v is None:
+            return None
+        s = str(v).strip().lower()
+        if s in ("auto", ""):
+            return None
+        try:
+            val = int(s)
+            if val <= 0:
+                raise ValueError(f"workers.{field_name} must be a positive integer or 'auto'")
+            return val
+        except (ValueError, TypeError) as err:
+            raise ValueError(f"workers.{field_name} must be a positive integer or 'auto'") from err
+
+    workers_cfg = WorkersCfg(
+        hdd=_parse_workers_val(workers_node.get("hdd", 1), "hdd"),
+        ssd=_parse_workers_val(workers_node.get("ssd", "auto"), "ssd"),
+        default=_parse_workers_val(workers_node.get("default", "auto"), "default"),
+    )
+
     return AppCfg(
         runtime=runtime,
         docker_support=docker_support,
@@ -301,6 +437,8 @@ def load_config(path: Path) -> AppCfg:
         presets_yaml_host=presets_host,
         presets_yaml_container=presets_container,
         unraid=unraid,
+        notifications=notifications,
+        workers=workers_cfg,
     )
 
 
@@ -421,6 +559,96 @@ def _unraid_candidate_roots() -> list[str]:
     disk_roots.sort(key=_natural_disk_sort_key)
     cache_roots.sort()
     return disk_roots + cache_roots
+
+
+# ----------------------------
+# Storage type detection (HDD vs SSD)
+# ----------------------------
+
+_RE_UNRAID_HDD = re.compile(r"^/mnt/disk\d+(/|$)")
+_RE_UNRAID_SSD = re.compile(r"^/mnt/cache(?:-.+)?(/|$)")
+
+
+def _detect_storage_type_sysblock(path: str) -> str:
+    """Detect storage type via /sys/block/*/queue/rotational for arbitrary Linux paths.
+
+    Returns "hdd", "ssd", or "unknown".
+    """
+    try:
+        stat_result = os.stat(path)
+    except OSError:
+        return "unknown"
+
+    major = os.major(stat_result.st_dev)
+    minor = os.minor(stat_result.st_dev)
+
+    # For device-mapper / md / lvm we need the actual parent block device.
+    # Try /sys/dev/block/<major>:<minor> → follow chain up to a real disk.
+    sys_path = f"/sys/dev/block/{major}:{minor}"
+    try:
+        real = os.path.realpath(sys_path)
+        # Walk up until we find a queue/rotational file
+        parts = real.split("/")
+        for i in range(len(parts), 2, -1):
+            candidate = "/".join(parts[:i]) + "/queue/rotational"
+            if os.path.isfile(candidate):
+                val = Path(candidate).read_text().strip()
+                return "hdd" if val == "1" else "ssd"
+    except OSError:
+        pass
+
+    return "unknown"
+
+
+def detect_storage_type(path: str) -> str:
+    """Detect whether *path* resides on HDD or SSD.
+
+    Detection tiers:
+    1. Unraid path pattern: /mnt/diskN → hdd, /mnt/cache* → ssd
+    2. /sys/block rotational flag (generic Linux fallback)
+    3. "unknown" if nothing matches
+
+    Returns "hdd", "ssd", or "unknown".
+    """
+    abs_path = os.path.abspath(path)
+
+    # Tier 1: Unraid path patterns (fast, no I/O)
+    if _RE_UNRAID_HDD.match(abs_path):
+        return "hdd"
+    if _RE_UNRAID_SSD.match(abs_path):
+        return "ssd"
+
+    # Tier 2: /sys/block rotational flag (generic Linux)
+    return _detect_storage_type_sysblock(abs_path)
+
+
+def resolve_workers(storage_type: str, workers_cfg: WorkersCfg) -> int | None:
+    """Map a storage type to the configured --workers value.
+
+    Returns an int (explicit worker count) or None (let mkbrr auto-detect).
+    """
+    if storage_type == "hdd":
+        return workers_cfg.hdd
+    if storage_type == "ssd":
+        return workers_cfg.ssd
+    return workers_cfg.default
+
+
+def _resolve_host_path_for_detection(
+    cfg: AppCfg, runtime: str, raw_input: str, host_data_root_override: str | None
+) -> str:
+    """Derive the host-side content path for storage type detection.
+
+    In native mode the content_path IS the host path.
+    In docker mode we need to map back from the container path.
+    """
+    if runtime == "native":
+        return map_content_path(cfg, "native", raw_input)
+    # Docker mode: use host_data_root_override if available (Unraid-resolved)
+    if host_data_root_override:
+        return host_data_root_override
+    # Fallback: map container → host
+    return map_content_path(cfg, "native", raw_input)
 
 
 def resolve_unraid_disk_path(cfg: AppCfg, raw: str) -> str:
@@ -1398,6 +1626,318 @@ def sanity_checks(cfg: AppCfg) -> None:
         # friendly reminder only
         pass
 
+    if cfg.docker_support and Path(cfg.paths.host_config_dir).exists():
+        # friendly reminder only
+        pass
+
+
+# ----------------------------
+# Notification system
+# ----------------------------
+
+
+@dataclass
+class NotifyEvent:
+    """Lightweight payload for a notification-worthy event."""
+
+    event_type: str  # create|batch|inspect|check
+    success: bool
+    title: str
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+def _format_duration(seconds: float) -> str:
+    """Human-friendly duration string."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    mins, secs = divmod(int(seconds), 60)
+    if mins < 60:
+        return f"{mins}m {secs}s"
+    hours, mins = divmod(mins, 60)
+    return f"{hours}h {mins}m {secs}s"
+
+
+def _format_pushover_html(event: NotifyEvent) -> str:
+    """Build an HTML body for a Pushover notification."""
+    lines: list[str] = []
+
+    if event.event_type == "create":
+        path = event.details.get("path", "")
+        preset = event.details.get("preset", "")
+        elapsed = event.details.get("elapsed")
+        exit_code = event.details.get("exit_code", 0)
+
+        if event.success:
+            lines.append('<font color="green"><b>✅ Torrent Created</b></font>')
+        else:
+            lines.append(f'<font color="red"><b>❌ Create Failed</b> (exit {exit_code})</font>')
+
+        lines.append(f"<b>Path:</b> {path}")
+        if preset:
+            lines.append(f"<b>Preset:</b> {preset}")
+        if elapsed is not None:
+            lines.append(f"<b>Duration:</b> {_format_duration(elapsed)}")
+
+    elif event.event_type == "batch":
+        succeeded = event.details.get("succeeded", 0)
+        failed = event.details.get("failed", 0)
+        total = succeeded + failed
+        elapsed = event.details.get("elapsed")
+        result_rows = event.details.get("result_rows", [])
+
+        if failed == 0:
+            lines.append('<font color="green"><b>✅ Batch Complete</b></font>')
+        elif succeeded == 0:
+            lines.append('<font color="red"><b>❌ Batch Failed</b></font>')
+        else:
+            lines.append('<font color="#F39C12"><b>⚠ Batch Partial</b></font>')
+
+        lines.append(
+            f'<font color="green">✅ {succeeded}</font> / '
+            f'<font color="red">❌ {failed}</font> of {total} job(s)'
+        )
+
+        if elapsed is not None:
+            lines.append(f"<b>Duration:</b> {_format_duration(elapsed)}")
+
+        # List failed jobs
+        failed_rows = [r for r in result_rows if r[3] != 0]
+        if failed_rows:
+            lines.append("")
+            lines.append("<b>Failed jobs:</b>")
+            for idx, content_path, _output_path, code in failed_rows[:10]:
+                lines.append(f"• Job {idx}: {content_path} (exit {code})")
+            if len(failed_rows) > 10:
+                lines.append(f"  … and {len(failed_rows) - 10} more")
+
+    elif event.event_type in ("inspect", "check"):
+        path = event.details.get("path", "")
+        exit_code = event.details.get("exit_code", 0)
+        elapsed = event.details.get("elapsed")
+        label = "Inspect" if event.event_type == "inspect" else "Check"
+
+        if event.success:
+            lines.append(f'<font color="green"><b>✅ {label} Complete</b></font>')
+        else:
+            lines.append(f'<font color="red"><b>❌ {label} Failed</b> (exit {exit_code})</font>')
+
+        lines.append(f"<b>Path:</b> {path}")
+        if elapsed is not None:
+            lines.append(f"<b>Duration:</b> {_format_duration(elapsed)}")
+
+    return "<br>".join(lines)
+
+
+def _format_discord_embed(event: NotifyEvent, discord_cfg: DiscordCfg) -> dict[str, Any]:
+    """Build a Discord embed dict for a notification event."""
+    from datetime import datetime, timezone
+
+    fields: list[dict[str, Any]] = []
+    description_lines: list[str] = []
+
+    if event.event_type == "create":
+        path = event.details.get("path", "")
+        preset = event.details.get("preset", "")
+        elapsed = event.details.get("elapsed")
+        exit_code = event.details.get("exit_code", 0)
+
+        color = discord_cfg.color_success if event.success else discord_cfg.color_failure
+        title = "✅ Torrent Created" if event.success else f"❌ Create Failed (exit {exit_code})"
+
+        fields.append({"name": "Path", "value": f"`{path}`", "inline": False})
+        if preset:
+            fields.append({"name": "Preset", "value": preset, "inline": True})
+        if elapsed is not None:
+            fields.append({"name": "Duration", "value": _format_duration(elapsed), "inline": True})
+
+    elif event.event_type == "batch":
+        succeeded = event.details.get("succeeded", 0)
+        failed = event.details.get("failed", 0)
+        total = succeeded + failed
+        elapsed = event.details.get("elapsed")
+        result_rows = event.details.get("result_rows", [])
+
+        if failed == 0:
+            color = discord_cfg.color_success
+            title = "✅ Batch Complete"
+        elif succeeded == 0:
+            color = discord_cfg.color_failure
+            title = "❌ Batch Failed"
+        else:
+            color = discord_cfg.color_partial
+            title = "⚠ Batch Partial"
+
+        fields.append(
+            {
+                "name": "Results",
+                "value": f"✅ {succeeded} / ❌ {failed} of {total} job(s)",
+                "inline": True,
+            }
+        )
+        if elapsed is not None:
+            fields.append({"name": "Duration", "value": _format_duration(elapsed), "inline": True})
+
+        failed_rows = [r for r in result_rows if r[3] != 0]
+        if failed_rows:
+            fail_lines = []
+            for idx, content_path, _output_path, code in failed_rows[:10]:
+                fail_lines.append(f"**Job {idx}:** `{content_path}` (exit {code})")
+            if len(failed_rows) > 10:
+                fail_lines.append(f"… and {len(failed_rows) - 10} more")
+            fields.append({"name": "Failed Jobs", "value": "\n".join(fail_lines), "inline": False})
+
+    elif event.event_type in ("inspect", "check"):
+        path = event.details.get("path", "")
+        exit_code = event.details.get("exit_code", 0)
+        elapsed = event.details.get("elapsed")
+        label = "Inspect" if event.event_type == "inspect" else "Check"
+
+        color = discord_cfg.color_success if event.success else discord_cfg.color_failure
+        title = f"✅ {label} Complete" if event.success else f"❌ {label} Failed (exit {exit_code})"
+
+        fields.append({"name": "Path", "value": f"`{path}`", "inline": False})
+        if elapsed is not None:
+            fields.append({"name": "Duration", "value": _format_duration(elapsed), "inline": True})
+
+    else:
+        color = discord_cfg.color_success if event.success else discord_cfg.color_failure
+        title = event.title
+
+    embed: dict[str, Any] = {
+        "title": title,
+        "color": color,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "mkbrr-wizard"},
+    }
+    if description_lines:
+        embed["description"] = "\n".join(description_lines)
+    if fields:
+        embed["fields"] = fields
+
+    return embed
+
+
+class NotificationManager:
+    """Fire-and-forget notification dispatcher with Pushover + Discord support.
+
+    Runs an asyncio event loop in a daemon thread so notification HTTP calls
+    never block the interactive TUI.
+    """
+
+    def __init__(self, cfg: NotificationsCfg) -> None:
+        self._cfg = cfg
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._active = False
+
+        if not cfg.enabled or cfg.policy == "off":
+            return
+        if not _has_httpx:
+            console.print(
+                "[warn]⚠ httpx is not installed — notifications disabled. "
+                "Install with: pip install 'httpx[http2]'[/]"
+            )
+            return
+        if not cfg.pushover.enabled and not cfg.discord.enabled:
+            return
+
+        # Spin up a background event loop
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=self._loop.run_forever, daemon=True, name="notify-loop"
+        )
+        self._thread.start()
+        self._active = True
+
+    def notify(self, event: NotifyEvent) -> None:
+        """Schedule a notification (fire-and-forget). Returns immediately."""
+        if not self._active or self._loop is None:
+            return
+
+        # Policy filtering
+        policy = self._cfg.policy
+        if policy == "off":
+            return
+        if policy == "failures_only" and event.success:
+            return
+        # "summary" = always send
+
+        asyncio.run_coroutine_threadsafe(self._dispatch(event), self._loop)
+
+    async def _dispatch(self, event: NotifyEvent) -> None:
+        """Gather provider tasks concurrently."""
+        tasks: list[asyncio.Task[None]] = []
+        if self._cfg.pushover.enabled:
+            tasks.append(asyncio.ensure_future(self._send_pushover(event)))
+        if self._cfg.discord.enabled:
+            tasks.append(asyncio.ensure_future(self._send_discord(event)))
+        if not tasks:
+            return
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                console.print(f"[warn]⚠ Notification provider error: {result}[/]")
+
+    async def _send_pushover(self, event: NotifyEvent) -> None:
+        """Send an HTML notification via Pushover API."""
+        po = self._cfg.pushover
+        if not po.app_token or not po.user_key:
+            return
+
+        priority = po.failure_priority if not event.success else po.priority
+        body = _format_pushover_html(event)
+
+        data: dict[str, Any] = {
+            "token": po.app_token,
+            "user": po.user_key,
+            "title": event.title,
+            "message": body,
+            "html": "1",
+            "priority": str(priority),
+        }
+        if po.device:
+            data["device"] = po.device
+
+        async with httpx.AsyncClient(http2=True, timeout=self._cfg.timeout_seconds) as client:
+            resp = await client.post("https://api.pushover.net/1/messages.json", data=data)
+            resp.raise_for_status()
+
+    async def _send_discord(self, event: NotifyEvent) -> None:
+        """Send an embed notification via Discord webhook."""
+        dc = self._cfg.discord
+        if not dc.webhook_url:
+            return
+
+        embed = _format_discord_embed(event, dc)
+        payload: dict[str, Any] = {"embeds": [embed]}
+        if dc.username:
+            payload["username"] = dc.username
+        if dc.avatar_url:
+            payload["avatar_url"] = dc.avatar_url
+
+        async with httpx.AsyncClient(http2=True, timeout=self._cfg.timeout_seconds) as client:
+            resp = await client.post(dc.webhook_url, json=payload)
+            resp.raise_for_status()
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Gracefully drain pending notifications and stop the background loop."""
+        if not self._active or self._loop is None or self._thread is None:
+            return
+        self._active = False
+        loop = self._loop
+        thread = self._thread
+
+        # Drain all pending tasks before stopping — prevents the last
+        # notification (e.g. a success summary) from being silently dropped.
+        async def _drain() -> None:
+            pending = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            loop.stop()
+
+        asyncio.run_coroutine_threadsafe(_drain(), loop)
+        thread.join(timeout=timeout)
+
 
 def render_header(cfg: AppCfg, runtime: str) -> None:
     """Render a stylish startup header using Rich."""
@@ -1410,6 +1950,9 @@ def render_header(cfg: AppCfg, runtime: str) -> None:
     table.add_row("Presets", cfg.presets_yaml_host)
     table.add_row("Output", cfg.paths.host_output_dir)
     table.add_row("chown", f"{cfg.chown} ({cfg.ownership.uid}:{cfg.ownership.gid})")
+    w = cfg.workers
+    workers_info = f"hdd={w.hdd or 'auto'}, ssd={w.ssd or 'auto'}, default={w.default or 'auto'}"
+    table.add_row("Workers", workers_info)
 
     console.rule("[title]mkbrr Wizard[/]")
     console.print(Panel(table, title="🧙 Config", border_style="magenta", box=box.ROUNDED))
@@ -1424,6 +1967,8 @@ def main() -> None:
     runtime = pick_runtime(cfg, forced)
 
     render_header(cfg, runtime)
+
+    notifier = NotificationManager(cfg.notifications)
 
     try:
         while True:
@@ -1486,13 +2031,45 @@ def main() -> None:
                     ]
                     cwd = cfg.paths.host_output_dir
 
+                # Auto-tune workers based on storage type
+                host_path = _resolve_host_path_for_detection(
+                    cfg, runtime, raw, host_data_root_override
+                )
+                storage_type = detect_storage_type(host_path)
+                workers = resolve_workers(storage_type, cfg.workers)
+                if workers is not None:
+                    cmd += ["--workers", str(workers)]
+                    console.print(
+                        f"[info]ℹ Storage detected as {storage_type.upper()} "
+                        f"→ --workers {workers}[/]"
+                    )
+                else:
+                    console.print(
+                        f"[info]ℹ Storage detected as {storage_type.upper()} " f"→ workers auto[/]"
+                    )
+
                 if confirm_cmd(cmd, cwd=cwd):
+                    t0 = time.monotonic()
                     r = subprocess.run(cmd, cwd=cwd, check=False)
+                    elapsed = time.monotonic() - t0
                     if r.returncode == 0:
                         console.print("[ok]✅ mkbrr create finished.[/]")
                         maybe_fix_torrent_permissions(cfg)
                     else:
                         console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
+                    notifier.notify(
+                        NotifyEvent(
+                            event_type="create",
+                            success=r.returncode == 0,
+                            title="Torrent Created" if r.returncode == 0 else "Create Failed",
+                            details={
+                                "path": raw,
+                                "preset": preset,
+                                "exit_code": r.returncode,
+                                "elapsed": elapsed,
+                            },
+                        )
+                    )
 
             elif action == "batch":
                 preset = pick_preset(cfg)
@@ -1555,6 +2132,7 @@ def main() -> None:
                 succeeded = 0
                 failed = 0
                 result_rows: list[tuple[int, str, str, int]] = []
+                batch_t0 = time.monotonic()
 
                 for idx, job in enumerate(typed_jobs, 1):
                     output_path = str(job.get("output", "")).strip()
@@ -1590,6 +2168,15 @@ def main() -> None:
                         result_rows.append((idx, content_path, output_path, 2))
                         console.print(f"[err]❌ Job {idx} invalid: {e}[/]")
                         continue
+
+                    # Auto-tune workers per job based on storage type
+                    job_host_path = _resolve_host_path_for_detection(
+                        cfg, runtime, content_path, job_override
+                    )
+                    job_storage = detect_storage_type(job_host_path)
+                    job_workers = resolve_workers(job_storage, cfg.workers)
+                    if job_workers is not None:
+                        cmd += ["--workers", str(job_workers)]
 
                     try:
                         r = subprocess.run(
@@ -1646,6 +2233,25 @@ def main() -> None:
                 else:
                     console.print("[err]❌ mkbrr batch create failed for all jobs.[/]")
 
+                batch_elapsed = time.monotonic() - batch_t0
+                notifier.notify(
+                    NotifyEvent(
+                        event_type="batch",
+                        success=failed == 0,
+                        title=(
+                            "Batch Complete"
+                            if failed == 0
+                            else "Batch Failed" if succeeded == 0 else "Batch Partial"
+                        ),
+                        details={
+                            "succeeded": succeeded,
+                            "failed": failed,
+                            "result_rows": result_rows,
+                            "elapsed": batch_elapsed,
+                        },
+                    )
+                )
+
             elif action == "inspect":
                 raw = ask_path("📄 Torrent file path", history=_torrent_history)
                 torrent_path = map_torrent_path(cfg, runtime, raw)
@@ -1663,11 +2269,25 @@ def main() -> None:
                     cmd.append("-v")
 
                 if confirm_cmd(cmd):
+                    t0 = time.monotonic()
                     r = subprocess.run(cmd, check=False)
+                    elapsed = time.monotonic() - t0
                     if r.returncode == 0:
                         console.print("[ok]✅ done.[/]")
                     else:
                         console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
+                    notifier.notify(
+                        NotifyEvent(
+                            event_type="inspect",
+                            success=r.returncode == 0,
+                            title="Inspect Complete" if r.returncode == 0 else "Inspect Failed",
+                            details={
+                                "path": raw,
+                                "exit_code": r.returncode,
+                                "elapsed": elapsed,
+                            },
+                        )
+                    )
 
             elif action == "check":
                 raw_t = ask_path("📄 Torrent file path", history=_torrent_history)
@@ -1688,6 +2308,22 @@ def main() -> None:
                 verbose = ask_verbose("check")
                 quiet = ask_quiet()
                 workers = ask_workers()
+
+                # If user chose auto, apply storage-type detection
+                if workers is None:
+                    check_host_path = _resolve_host_path_for_detection(cfg, runtime, raw_c, None)
+                    check_storage = detect_storage_type(check_host_path)
+                    workers = resolve_workers(check_storage, cfg.workers)
+                    if workers is not None:
+                        console.print(
+                            f"[info]ℹ Storage detected as {check_storage.upper()} "
+                            f"→ --workers {workers}[/]"
+                        )
+                    else:
+                        console.print(
+                            f"[info]ℹ Storage detected as {check_storage.upper()} "
+                            f"→ workers auto[/]"
+                        )
 
                 if quiet and verbose:
                     console.print("[warn]⚠ Both verbose and quiet selected; preferring quiet.[/]")
@@ -1710,11 +2346,25 @@ def main() -> None:
                     cmd += ["--workers", str(workers)]
 
                 if confirm_cmd(cmd):
+                    t0 = time.monotonic()
                     r = subprocess.run(cmd, check=False)
+                    elapsed = time.monotonic() - t0
                     if r.returncode == 0:
                         console.print("[ok]✅ data verified.[/]")
                     else:
                         console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
+                    notifier.notify(
+                        NotifyEvent(
+                            event_type="check",
+                            success=r.returncode == 0,
+                            title="Data Verified" if r.returncode == 0 else "Check Failed",
+                            details={
+                                "path": raw_t,
+                                "exit_code": r.returncode,
+                                "elapsed": elapsed,
+                            },
+                        )
+                    )
 
             console.rule(style="dim")
             if not Confirm.ask("Do another operation?", default=False):
@@ -1723,6 +2373,8 @@ def main() -> None:
 
     except (KeyboardInterrupt, EOFError):
         console.print("\n[dim]⏹ Interrupted. Bye.[/]")
+    finally:
+        notifier.shutdown()
 
 
 if __name__ == "__main__":

@@ -53,5 +53,49 @@ ownership:
   uid: 99
   gid: 100
 
+# Notification system — sends alerts via Pushover and/or Discord.
+# Both providers can be enabled simultaneously.
+# Requires: pip install 'httpx[http2]' (optional dep, gracefully disabled if missing)
+# Secrets can use env vars: ${PUSHOVER_APP_TOKEN}, ${DISCORD_WEBHOOK_URL}
+# Tip: put secrets in a .env file next to config.yaml (loaded automatically if python-dotenv is installed)
+notifications:
+  enabled: false
+  # summary        = notify after every operation + immediate failure alerts
+  # failures_only  = only notify when something fails
+  # off            = disable entirely (same as enabled: false)
+  policy: summary
+
+  pushover:
+    enabled: false
+    app_token: ${PUSHOVER_APP_TOKEN}
+    user_key: ${PUSHOVER_USER_KEY}
+    # Pushover priority: -2 (silent) to 2 (emergency)
+    priority: 0
+    failure_priority: 1
+    # Optional: target specific device name(s)
+    device: ""
+
+  discord:
+    enabled: false
+    webhook_url: ${DISCORD_WEBHOOK_URL}
+    username: "mkbrr-wizard"
+    avatar_url: ""
+    # Embed sidebar colors (hex integers)
+    color_success: 0x2ECC71
+    color_failure: 0xE74C3C
+    color_partial: 0xF39C12
+
+  # HTTP timeout per notification request (seconds)
+  timeout_seconds: 10
+
+# Worker auto-tuning — automatically sets --workers based on storage type.
+# Detects HDD vs SSD via Unraid path patterns (/mnt/diskN = HDD, /mnt/cache* = SSD)
+# with /sys/block rotational flag as a fallback for non-Unraid Linux.
+# Use an integer for a specific worker count, or "auto" to let mkbrr decide.
+workers:
+  hdd: 1        # spinning disks benefit from sequential I/O (1 worker)
+  ssd: auto     # SSDs/NVMe handle parallel hashing well (let mkbrr auto-detect)
+  default: auto # fallback when storage type can't be determined
+
 # Optional debug/test override - set to false in production if you want safer behaviour
 # docker_support: false
