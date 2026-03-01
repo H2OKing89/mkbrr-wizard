@@ -8,6 +8,19 @@ runtime: auto
 docker_support: true
 chown: true
 
+unraid:
+  # Enable to resolve /mnt/user/* paths to physical /mnt/diskN/* or /mnt/cache* mounts.
+  enabled: false
+  fuse_root: /mnt/user
+  # split_share_preflight: off|warn|fail
+  # - fail: abort before mkbrr when files are split across disks for this path
+  # - warn: print warning and continue
+  # - off : disable this preflight
+  split_share_preflight: fail
+  # Upper bound for files scanned during split-share detection (to avoid huge tree scans)
+  split_share_max_entries: 20000
+  split_share_follow_symlinks: false
+
 theapp:
   # optional - run mkbrr inside docker as a specific user: "99:100"
   # docker_user: "99:100"

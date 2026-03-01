@@ -20,12 +20,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -161,6 +162,15 @@ class BatchCfg:
 
 
 @dataclass(frozen=True)
+class UnraidCfg:
+    enabled: bool = False
+    fuse_root: str = "/mnt/user"
+    split_share_preflight: str = "fail"  # off|warn|fail
+    split_share_max_entries: int = 20000
+    split_share_follow_symlinks: bool = False
+
+
+@dataclass(frozen=True)
 class AppCfg:
     runtime: str  # auto|docker|native
     docker_support: bool
@@ -174,6 +184,7 @@ class AppCfg:
 
     presets_yaml_host: str  # absolute host path to presets.yaml
     presets_yaml_container: str  # container path to presets.yaml (docker runtime)
+    unraid: UnraidCfg = field(default_factory=UnraidCfg)
 
 
 def load_config(path: Path) -> AppCfg:
@@ -245,6 +256,25 @@ def load_config(path: Path) -> AppCfg:
 
     batch = BatchCfg(mode=batch_mode, job_timeout_seconds=job_timeout_seconds)
 
+    unraid_node: dict[str, Any] = cast(dict[str, Any], raw.get("unraid") or {})
+    preflight_mode = str(unraid_node.get("split_share_preflight", "fail")).strip().lower()
+    if preflight_mode not in ("off", "warn", "fail"):
+        raise ValueError("unraid.split_share_preflight must be one of: off, warn, fail")
+
+    split_share_max_entries = int(unraid_node.get("split_share_max_entries", 20000))
+    if split_share_max_entries <= 0:
+        raise ValueError("unraid.split_share_max_entries must be a positive integer")
+
+    unraid = UnraidCfg(
+        enabled=_coerce_bool(unraid_node.get("enabled", False), False),
+        fuse_root=_expand_path(str(unraid_node.get("fuse_root", "/mnt/user"))).rstrip("/"),
+        split_share_preflight=preflight_mode,
+        split_share_max_entries=split_share_max_entries,
+        split_share_follow_symlinks=_coerce_bool(
+            unraid_node.get("split_share_follow_symlinks", False), False
+        ),
+    )
+
     presets_yaml_raw = str(raw.get("presets_yaml", "presets.yaml")).strip()
 
     # Expand first (handles ~/ and $HOME/ etc)
@@ -270,6 +300,7 @@ def load_config(path: Path) -> AppCfg:
         batch=batch,
         presets_yaml_host=presets_host,
         presets_yaml_container=presets_container,
+        unraid=unraid,
     )
 
 
@@ -371,6 +402,255 @@ def map_torrent_path(cfg: AppCfg, runtime: str, raw: str) -> str:
         return os.path.abspath(raw)
 
 
+def _natural_disk_sort_key(path: str) -> tuple[int, str]:
+    name = os.path.basename(path)
+    match = re.fullmatch(r"disk(\d+)", name)
+    if not match:
+        return (sys.maxsize, name)
+    return (int(match.group(1)), name)
+
+
+def _unraid_candidate_roots() -> list[str]:
+    try:
+        entries = [entry.path for entry in os.scandir("/mnt") if entry.is_dir()]
+    except OSError:
+        return []
+
+    disk_roots = [p for p in entries if re.fullmatch(r"disk\d+", os.path.basename(p))]
+    cache_roots = [p for p in entries if re.fullmatch(r"cache(?:-.+)?", os.path.basename(p))]
+    disk_roots.sort(key=_natural_disk_sort_key)
+    cache_roots.sort()
+    return disk_roots + cache_roots
+
+
+def resolve_unraid_disk_path(cfg: AppCfg, raw: str) -> str:
+    """Resolve /mnt/user paths to physical /mnt/diskN or /mnt/cache* paths on Unraid."""
+    raw = (raw or "").strip()
+    if not raw or not cfg.unraid.enabled:
+        return raw
+
+    abs_path = os.path.abspath(raw)
+    fuse_root = cfg.unraid.fuse_root.rstrip("/") or "/mnt/user"
+
+    if abs_path != fuse_root and not abs_path.startswith(f"{fuse_root}/"):
+        return abs_path
+
+    relative = abs_path[len(fuse_root) :]
+    if not relative.startswith("/"):
+        relative = f"/{relative}"
+
+    for root in _unraid_candidate_roots():
+        candidate = f"{root}{relative}"
+        if os.path.exists(candidate):
+            console.print(f"[info]ℹ Unraid resolved content path to:[/] {candidate}")
+            return candidate
+
+    console.print(f"[warn]⚠ Unraid path not found on disk/cache mounts:[/] {abs_path}")
+    return abs_path
+
+
+def _resolve_unraid_host_data_root(cfg: AppCfg, resolved_host_path: str) -> str | None:
+    """Return host_data_root override (e.g. /mnt/disk5/data) for docker bind mount."""
+    if not cfg.unraid.enabled:
+        return None
+
+    host_data_root = cfg.paths.host_data_root.rstrip("/")
+    fuse_root = cfg.unraid.fuse_root.rstrip("/") or "/mnt/user"
+    if host_data_root != fuse_root and not host_data_root.startswith(f"{fuse_root}/"):
+        return None
+
+    relative_from_mnt = resolved_host_path.removeprefix("/mnt/")
+    if "/" not in relative_from_mnt:
+        return None
+    mount_root_name = relative_from_mnt.split("/", 1)[0]
+    if not re.fullmatch(r"disk\d+|cache(?:-.+)?", mount_root_name):
+        return None
+
+    suffix = host_data_root[len(fuse_root) :]
+    if suffix and not suffix.startswith("/"):
+        suffix = f"/{suffix}"
+
+    mount_root = f"/mnt/{mount_root_name}"
+    return f"{mount_root}{suffix}" if suffix else mount_root
+
+
+def resolve_unraid_content_path(cfg: AppCfg, runtime: str, raw: str) -> tuple[str, str | None]:
+    """Return (content_path_for_runtime, host_data_root_override_for_docker)."""
+    mapped = map_content_path(cfg, runtime, raw)
+    if not cfg.unraid.enabled:
+        return mapped, None
+
+    host_view = map_content_path(cfg, "native", mapped)
+    resolved_host = resolve_unraid_disk_path(cfg, host_view)
+
+    if runtime == "docker":
+        host_override = _resolve_unraid_host_data_root(cfg, resolved_host)
+        mapped_resolved = map_content_path(cfg, "docker", resolved_host)
+        if host_override and (
+            resolved_host.startswith(host_override + "/") or resolved_host == host_override
+        ):
+            mapped_resolved = cfg.paths.container_data_root + resolved_host[len(host_override) :]
+        return mapped_resolved, host_override
+
+    return resolved_host, None
+
+
+def _detect_split_share_mismatch(
+    original_host_path: str,
+    resolved_host_path: str,
+    *,
+    max_entries: int,
+    follow_symlinks: bool,
+) -> tuple[int, list[str], int, bool]:
+    """Return (missing_count, sample_missing_relpaths, permission_errors, capped_scan)."""
+    missing_count = 0
+    missing_examples: list[str] = []
+    permission_errors = 0
+    scanned = 0
+    capped_scan = False
+
+    if os.path.isfile(original_host_path):
+        if not os.path.exists(resolved_host_path):
+            return (1, [os.path.basename(original_host_path)], 0, False)
+        return (0, [], 0, False)
+
+    if not os.path.isdir(original_host_path):
+        return (0, [], 0, False)
+
+    def _onerror(_: OSError) -> None:
+        nonlocal permission_errors
+        permission_errors += 1
+
+    stop_scan = False
+    for root, _, files in os.walk(
+        original_host_path,
+        topdown=True,
+        onerror=_onerror,
+        followlinks=follow_symlinks,
+    ):
+        for filename in files:
+            scanned += 1
+            if scanned > max_entries:
+                capped_scan = True
+                stop_scan = True
+                break
+
+            source_file = os.path.join(root, filename)
+            rel = os.path.relpath(source_file, original_host_path)
+            target_file = os.path.join(resolved_host_path, rel)
+            if not os.path.exists(target_file):
+                missing_count += 1
+                if len(missing_examples) < 5:
+                    missing_examples.append(rel)
+        if stop_scan:
+            break
+
+    return (missing_count, missing_examples, permission_errors, capped_scan)
+
+
+def preflight_unraid_split_share(
+    cfg: AppCfg,
+    *,
+    runtime: str,
+    content_path: str,
+    host_data_root_override: str | None,
+    original_input_path: str | None = None,
+    context: str,
+) -> None:
+    """Detect split-share file layouts and optionally fail before invoking mkbrr."""
+    if not cfg.unraid.enabled:
+        return
+
+    mode = cfg.unraid.split_share_preflight
+    if mode == "off":
+        return
+
+    fuse_root = cfg.unraid.fuse_root.rstrip("/") or "/mnt/user"
+    host_data_root = cfg.paths.host_data_root.rstrip("/")
+    original_host_path: str | None = None
+    resolved_host_path: str | None = None
+
+    if runtime == "docker":
+        mapped = content_path.strip()
+        container_root = cfg.paths.container_data_root.rstrip("/")
+        if mapped != container_root and not mapped.startswith(container_root + "/"):
+            return
+
+        relative = mapped[len(container_root) :]
+        original_host_path = f"{host_data_root}{relative}"
+        base = host_data_root_override or host_data_root
+        resolved_host_path = f"{base}{relative}"
+    else:
+        resolved_host_path = os.path.abspath(content_path)
+        if original_input_path:
+            mapped_original = map_content_path(cfg, "native", original_input_path)
+            if mapped_original == fuse_root or mapped_original.startswith(f"{fuse_root}/"):
+                original_host_path = mapped_original
+
+        if original_host_path is None:
+            suffix = (
+                host_data_root[len(fuse_root) :] if host_data_root.startswith(fuse_root) else ""
+            )
+            if suffix and not suffix.startswith("/"):
+                suffix = f"/{suffix}"
+
+            match = re.match(r"^/mnt/(disk\d+|cache(?:-.+)?)(/.*)?$", resolved_host_path)
+            if match and suffix:
+                candidate_root = f"/mnt/{match.group(1)}{suffix}"
+                if resolved_host_path == candidate_root or resolved_host_path.startswith(
+                    candidate_root + "/"
+                ):
+                    relative = resolved_host_path[len(candidate_root) :]
+                    original_host_path = f"{host_data_root}{relative}"
+
+    if not original_host_path or not resolved_host_path:
+        return
+    if original_host_path == resolved_host_path:
+        return
+    if not os.path.exists(original_host_path):
+        return
+
+    missing_count, missing_examples, permission_errors, capped_scan = _detect_split_share_mismatch(
+        original_host_path,
+        resolved_host_path,
+        max_entries=cfg.unraid.split_share_max_entries,
+        follow_symlinks=cfg.unraid.split_share_follow_symlinks,
+    )
+
+    if missing_count == 0 and permission_errors == 0:
+        if capped_scan:
+            console.print(
+                "[warn]⚠ Unraid preflight scan reached max entries; full split-share validation was not exhaustive.[/]"
+            )
+        return
+
+    details: list[str] = []
+    if missing_count > 0:
+        details.append(f"missing {missing_count} file(s) on resolved mount")
+    if permission_errors > 0:
+        details.append(f"{permission_errors} permission error(s) while scanning")
+    if capped_scan:
+        details.append(f"scan capped at {cfg.unraid.split_share_max_entries} entries")
+
+    base_msg = (
+        f"Unraid preflight ({context}) detected possible split-share content: "
+        f"{'; '.join(details)}\n"
+        f"  original: {original_host_path}\n"
+        f"  resolved: {resolved_host_path}"
+    )
+    if missing_examples:
+        base_msg += "\n  examples: " + ", ".join(missing_examples)
+
+    if mode == "warn":
+        console.print(f"[warn]⚠ {base_msg}[/]")
+        return
+
+    raise ValueError(
+        base_msg
+        + "\nUse /mnt/user (FUSE) for this content, or gather files onto a single disk/pool path first."
+    )
+
+
 # ----------------------------
 # Docker command builder
 # ----------------------------
@@ -382,11 +662,19 @@ def map_torrent_path(cfg: AppCfg, runtime: str, raw: str) -> str:
 
 
 def build_create_command(
-    cfg: AppCfg, runtime: str, content_path: str, preset: str
+    cfg: AppCfg,
+    runtime: str,
+    content_path: str,
+    preset: str,
+    host_data_root_override: str | None = None,
 ) -> tuple[list[str], str | None]:
     """Return (cmd, cwd) for create action depending on runtime."""
     if runtime == "docker":
-        cmd = docker_run_base(cfg, cfg.paths.container_output_dir) + [
+        cmd = docker_run_base(
+            cfg,
+            cfg.paths.container_output_dir,
+            host_data_root_override=host_data_root_override,
+        ) + [
             "create",
             content_path,
             "-P",
@@ -415,7 +703,11 @@ def _append_bool_flag(cmd: list[str], flag: str, *, value: bool) -> None:
 
 
 def build_batch_job_create_command(
-    cfg: AppCfg, runtime: str, preset: str, job: dict[str, Any]
+    cfg: AppCfg,
+    runtime: str,
+    preset: str,
+    job: dict[str, Any],
+    host_data_root_override: str | None = None,
 ) -> tuple[list[str], str | None]:
     """Return (cmd, cwd) for a single batch job executed via mkbrr create."""
     content_path = str(job.get("path", "")).strip()
@@ -423,7 +715,13 @@ def build_batch_job_create_command(
     if not output_path:
         raise ValueError("Batch job output path cannot be empty")
 
-    cmd, cwd = build_create_command(cfg, runtime, content_path, preset)
+    cmd, cwd = build_create_command(
+        cfg,
+        runtime,
+        content_path,
+        preset,
+        host_data_root_override=host_data_root_override,
+    )
     output_dir = str(Path(output_path).parent)
     cmd += ["--output-dir", output_dir]
 
@@ -530,7 +828,9 @@ def build_check_command(
     return cmd
 
 
-def docker_run_base(cfg: AppCfg, workdir: str) -> list[str]:
+def docker_run_base(
+    cfg: AppCfg, workdir: str, host_data_root_override: str | None = None
+) -> list[str]:
     cmd = ["docker", "run", "--rm"]
 
     # Only add -it when interactive; cron/log files hate TTY
@@ -540,11 +840,13 @@ def docker_run_base(cfg: AppCfg, workdir: str) -> list[str]:
     if cfg.docker_user:
         cmd += ["--user", cfg.docker_user]
 
+    data_root = host_data_root_override or cfg.paths.host_data_root
+
     cmd += [
         "-w",
         workdir,
         "-v",
-        f"{cfg.paths.host_data_root}:{cfg.paths.container_data_root}",
+        f"{data_root}:{cfg.paths.container_data_root}",
         "-v",
         f"{cfg.paths.host_output_dir}:{cfg.paths.container_output_dir}",
         "-v",
@@ -1004,9 +1306,9 @@ def map_batch_job_paths(cfg: AppCfg, runtime: str, payload: dict[str, Any]) -> d
         job = cast(dict[str, Any], raw_job)
 
         original_path = str(job.get("path", "")).strip()
-        mapped_path = (
-            map_content_path(cfg, runtime, original_path) if original_path else original_path
-        )
+        mapped_path = original_path
+        if original_path:
+            mapped_path, _ = resolve_unraid_content_path(cfg, runtime, original_path)
         job["path"] = mapped_path
         if (
             runtime == "docker"
@@ -1104,6 +1406,7 @@ def render_header(cfg: AppCfg, runtime: str) -> None:
     table.add_column("val")
     table.add_row("Runtime", f"[bold]{runtime}[/]")
     table.add_row("Docker", f"{cfg.docker_support} (user={cfg.docker_user or 'none'})")
+    table.add_row("Unraid", f"{cfg.unraid.enabled} (fuse_root={cfg.unraid.fuse_root})")
     table.add_row("Presets", cfg.presets_yaml_host)
     table.add_row("Output", cfg.paths.host_output_dir)
     table.add_row("chown", f"{cfg.chown} ({cfg.ownership.uid}:{cfg.ownership.gid})")
@@ -1130,7 +1433,9 @@ def main() -> None:
             if action == "create":
                 preset = pick_preset(cfg)
                 raw = ask_path("📂 Content path", history=_content_history)
-                content_path = map_content_path(cfg, runtime, raw)
+                content_path, host_data_root_override = resolve_unraid_content_path(
+                    cfg, runtime, raw
+                )
 
                 # Check existence for native mode before calling mkbrr
                 if runtime == "native" and not os.path.exists(content_path):
@@ -1140,10 +1445,27 @@ def main() -> None:
                     )
                     continue
 
+                try:
+                    preflight_unraid_split_share(
+                        cfg,
+                        runtime=runtime,
+                        content_path=content_path,
+                        host_data_root_override=host_data_root_override,
+                        original_input_path=raw,
+                        context="create",
+                    )
+                except ValueError as e:
+                    console.print(f"[err]❌ {e}[/]")
+                    continue
+
                 # Build command.
                 # We avoid output flags entirely and rely on cwd / -w output_dir.
                 if runtime == "docker":
-                    cmd = docker_run_base(cfg, cfg.paths.container_output_dir) + [
+                    cmd = docker_run_base(
+                        cfg,
+                        cfg.paths.container_output_dir,
+                        host_data_root_override=host_data_root_override,
+                    ) + [
                         "create",
                         content_path,
                         "-P",
@@ -1209,8 +1531,17 @@ def main() -> None:
                 render_batch_summary(payload)
 
                 try:
+                    preview_override = None
+                    if runtime == "docker":
+                        preview_override = resolve_unraid_content_path(
+                            cfg, runtime, str(typed_jobs[0].get("path", ""))
+                        )[1]
                     preview_cmd, preview_cwd = build_batch_job_create_command(
-                        cfg, runtime, preset, typed_jobs[0]
+                        cfg,
+                        runtime,
+                        preset,
+                        typed_jobs[0],
+                        host_data_root_override=preview_override,
                     )
                 except ValueError as e:
                     console.print(f"[err]❌ Invalid batch job: {e}[/]")
@@ -1228,8 +1559,32 @@ def main() -> None:
                 for idx, job in enumerate(typed_jobs, 1):
                     output_path = str(job.get("output", "")).strip()
                     content_path = str(job.get("path", "")).strip()
+                    job_override = None
+                    if runtime == "docker":
+                        job_override = resolve_unraid_content_path(cfg, runtime, content_path)[1]
+
                     try:
-                        cmd, cwd = build_batch_job_create_command(cfg, runtime, preset, job)
+                        preflight_unraid_split_share(
+                            cfg,
+                            runtime=runtime,
+                            content_path=content_path,
+                            host_data_root_override=job_override,
+                            context=f"batch job {idx}",
+                        )
+                    except ValueError as e:
+                        failed += 1
+                        result_rows.append((idx, content_path, output_path, 2))
+                        console.print(f"[err]❌ Job {idx} preflight failed: {e}[/]")
+                        continue
+
+                    try:
+                        cmd, cwd = build_batch_job_create_command(
+                            cfg,
+                            runtime,
+                            preset,
+                            job,
+                            host_data_root_override=job_override,
+                        )
                     except ValueError as e:
                         failed += 1
                         result_rows.append((idx, content_path, output_path, 2))

@@ -41,6 +41,11 @@ chown: false
             assert cfg.mkbrr.image == "ghcr.io/autobrr/mkbrr"
             assert cfg.ownership.uid == 99
             assert cfg.ownership.gid == 100
+            assert cfg.unraid.enabled is False
+            assert cfg.unraid.fuse_root == "/mnt/user"
+            assert cfg.unraid.split_share_preflight == "fail"
+            assert cfg.unraid.split_share_max_entries == 20000
+            assert cfg.unraid.split_share_follow_symlinks is False
         finally:
             os.unlink(temp_path)
 
@@ -69,6 +74,12 @@ ownership:
   gid: 1000
 
 presets_yaml: /custom/presets.yaml
+unraid:
+    enabled: true
+    fuse_root: /mnt/user
+    split_share_preflight: warn
+    split_share_max_entries: 123
+    split_share_follow_symlinks: true
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write(yaml_content)
@@ -94,6 +105,47 @@ presets_yaml: /custom/presets.yaml
             assert cfg.ownership.gid == 1000
 
             assert cfg.presets_yaml_host == "/custom/presets.yaml"
+            assert cfg.unraid.enabled is True
+            assert cfg.unraid.fuse_root == "/mnt/user"
+            assert cfg.unraid.split_share_preflight == "warn"
+            assert cfg.unraid.split_share_max_entries == 123
+            assert cfg.unraid.split_share_follow_symlinks is True
+        finally:
+            os.unlink(temp_path)
+
+    def test_invalid_unraid_preflight_mode_raises(self, mkbrr_wizard: ModuleType) -> None:
+        yaml_content = """
+runtime: native
+unraid:
+  enabled: true
+  split_share_preflight: maybe
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            temp_path = f.name
+
+        try:
+            with pytest.raises(ValueError, match=r"unraid\.split_share_preflight must be one of"):
+                mkbrr_wizard.load_config(Path(temp_path))
+        finally:
+            os.unlink(temp_path)
+
+    def test_invalid_unraid_max_entries_raises(self, mkbrr_wizard: ModuleType) -> None:
+        yaml_content = """
+runtime: native
+unraid:
+  enabled: true
+  split_share_max_entries: 0
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            temp_path = f.name
+
+        try:
+            with pytest.raises(
+                ValueError, match=r"unraid\.split_share_max_entries must be a positive integer"
+            ):
+                mkbrr_wizard.load_config(Path(temp_path))
         finally:
             os.unlink(temp_path)
 
