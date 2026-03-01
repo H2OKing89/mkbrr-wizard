@@ -193,7 +193,7 @@ notifications:
             f.write(yaml_content)
             temp_path = f.name
         try:
-            with pytest.raises(ValueError, match="notifications.policy"):
+            with pytest.raises(ValueError, match=r"notifications\.policy"):
                 mkbrr_wizard.load_config(Path(temp_path))
         finally:
             os.unlink(temp_path)

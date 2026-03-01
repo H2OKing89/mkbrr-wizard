@@ -591,9 +591,11 @@ def _detect_storage_type_sysblock(path: str) -> str:
         parts = real.split("/")
         for i in range(len(parts), 2, -1):
             candidate = "/".join(parts[:i]) + "/queue/rotational"
-            if os.path.isfile(candidate):
+            try:
                 val = Path(candidate).read_text().strip()
-                return "hdd" if val == "1" else "ssd"
+            except (FileNotFoundError, OSError):
+                continue
+            return "hdd" if val == "1" else "ssd"
     except OSError:
         pass
 
@@ -1626,10 +1628,6 @@ def sanity_checks(cfg: AppCfg) -> None:
         # friendly reminder only
         pass
 
-    if cfg.docker_support and Path(cfg.paths.host_config_dir).exists():
-        # friendly reminder only
-        pass
-
 
 # ----------------------------
 # Notification system
@@ -1828,6 +1826,7 @@ class NotificationManager:
         self._cfg = cfg
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+        self._http_client: Any | None = None
         self._active = False
 
         if not cfg.enabled or cfg.policy == "off":
@@ -1848,6 +1847,17 @@ class NotificationManager:
         )
         self._thread.start()
         self._active = True
+
+    async def _get_http_client(self) -> Any:
+        """Return a shared AsyncClient instance for this manager."""
+        if self._http_client is None:
+            if not _has_httpx or httpx is None:
+                raise RuntimeError("httpx is not available")
+            self._http_client = httpx.AsyncClient(
+                http2=True,
+                timeout=self._cfg.timeout_seconds,
+            )
+        return self._http_client
 
     def notify(self, event: NotifyEvent) -> None:
         """Schedule a notification (fire-and-forget). Returns immediately."""
@@ -1898,9 +1908,9 @@ class NotificationManager:
         if po.device:
             data["device"] = po.device
 
-        async with httpx.AsyncClient(http2=True, timeout=self._cfg.timeout_seconds) as client:
-            resp = await client.post("https://api.pushover.net/1/messages.json", data=data)
-            resp.raise_for_status()
+        client = await self._get_http_client()
+        resp = await client.post("https://api.pushover.net/1/messages.json", data=data)
+        resp.raise_for_status()
 
     async def _send_discord(self, event: NotifyEvent) -> None:
         """Send an embed notification via Discord webhook."""
@@ -1915,9 +1925,9 @@ class NotificationManager:
         if dc.avatar_url:
             payload["avatar_url"] = dc.avatar_url
 
-        async with httpx.AsyncClient(http2=True, timeout=self._cfg.timeout_seconds) as client:
-            resp = await client.post(dc.webhook_url, json=payload)
-            resp.raise_for_status()
+        client = await self._get_http_client()
+        resp = await client.post(dc.webhook_url, json=payload)
+        resp.raise_for_status()
 
     def shutdown(self, timeout: float = 5.0) -> None:
         """Gracefully drain pending notifications and stop the background loop."""
@@ -1933,6 +1943,9 @@ class NotificationManager:
             pending = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
+            if self._http_client is not None:
+                await self._http_client.aclose()
+                self._http_client = None
             loop.stop()
 
         asyncio.run_coroutine_threadsafe(_drain(), loop)

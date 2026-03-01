@@ -107,7 +107,7 @@ workers:
             f.write(yaml_content)
             temp_path = f.name
         try:
-            with pytest.raises(ValueError, match="workers.hdd"):
+            with pytest.raises(ValueError, match=r"workers\.hdd"):
                 mkbrr_wizard.load_config(Path(temp_path))
         finally:
             os.unlink(temp_path)
@@ -124,7 +124,7 @@ workers:
             f.write(yaml_content)
             temp_path = f.name
         try:
-            with pytest.raises(ValueError, match="workers.ssd"):
+            with pytest.raises(ValueError, match=r"workers\.ssd"):
                 mkbrr_wizard.load_config(Path(temp_path))
         finally:
             os.unlink(temp_path)
@@ -141,7 +141,7 @@ workers:
             f.write(yaml_content)
             temp_path = f.name
         try:
-            with pytest.raises(ValueError, match="workers.hdd"):
+            with pytest.raises(ValueError, match=r"workers\.hdd"):
                 mkbrr_wizard.load_config(Path(temp_path))
         finally:
             os.unlink(temp_path)
