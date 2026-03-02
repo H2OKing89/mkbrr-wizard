@@ -1,6 +1,6 @@
 # mkbrr-wizard
 
-An interactive command-line wizard for working with [mkbrr](https://github.com/autobrr/mkbrr) via Docker. This tool simplifies the process of creating, inspecting, and verifying torrent files on Unraid systems.
+An interactive command-line wizard for working with [mkbrr](https://mkbrr.com) via Docker. This tool simplifies the process of creating, inspecting, and verifying torrent files on Unraid systems.
 
 ## Features
 
@@ -16,11 +16,29 @@ An interactive command-line wizard for working with [mkbrr](https://github.com/a
 
 - Python 3.10+
 - Docker
-- [mkbrr Docker image](https://github.com/autobrr/mkbrr) (`ghcr.io/autobrr/mkbrr`)
+- [mkbrr Docker image](https://mkbrr.com/installation#docker) (`ghcr.io/autobrr/mkbrr`)
 - Python runtime dependencies: see `requirements.txt` (`pip install -r requirements.txt`)
   - PyYAML (required)
   - rich (UI)
   - prompt_toolkit (optional, enhanced prompts)
+
+## mkbrr Documentation
+
+Full mkbrr docs are available at **<https://mkbrr.com>**. Local offline copies (fetched from the upstream site) are also included in this repository under [`docs/`](docs/):
+
+| File | Description | Online |
+| ---- | ----------- | ------ |
+| [`docs/installation.md`](docs/installation.md) | Installing mkbrr (binaries, Docker, package managers) | [mkbrr.com/installation](https://mkbrr.com/installation) |
+| [`docs/cli-reference-create.md`](docs/cli-reference-create.md) | `mkbrr create` — all flags and options | [mkbrr.com/cli-reference/create](https://mkbrr.com/cli-reference/create) |
+| [`docs/cli-reference-check-inspect.md`](docs/cli-reference-check-inspect.md) | `mkbrr check` and `mkbrr inspect` | [mkbrr.com/cli-reference/check](https://mkbrr.com/cli-reference/check) · [inspect](https://mkbrr.com/cli-reference/inspect) |
+| [`docs/presets.md`](docs/presets.md) | Presets (`presets.yaml`) — structure, options, overrides | [mkbrr.com/features/presets](https://mkbrr.com/features/presets) |
+| [`docs/batch-mode.md`](docs/batch-mode.md) | Batch mode (`batch.yaml`) — structure, options, examples | [mkbrr.com/features/batch-mode](https://mkbrr.com/features/batch-mode) |
+
+To refresh the local copies from upstream:
+
+```bash
+bash scripts/update-mkbrr-docs.sh
+```
 
 ## Installation
 
