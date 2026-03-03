@@ -178,6 +178,42 @@ class TestDetectStorageType:
         with patch.object(mkbrr_wizard, "_detect_storage_type_sysblock", return_value="unknown"):
             assert mkbrr_wizard.detect_storage_type("/mnt/diskfoo/test") == "unknown"
 
+    def test_unraid_fuse_path_resolves_to_hdd(self, mkbrr_wizard: ModuleType) -> None:
+        with (
+            patch.object(
+                mkbrr_wizard,
+                "_unraid_candidate_roots",
+                return_value=["/mnt/disk5", "/mnt/cache"],
+            ),
+            patch("os.path.exists", side_effect=lambda p: p == "/mnt/disk5/data/test"),
+        ):
+            assert mkbrr_wizard.detect_storage_type("/mnt/user/data/test") == "hdd"
+
+    def test_unraid_fuse_path_resolves_to_ssd(self, mkbrr_wizard: ModuleType) -> None:
+        with (
+            patch.object(
+                mkbrr_wizard,
+                "_unraid_candidate_roots",
+                return_value=["/mnt/disk5", "/mnt/cache"],
+            ),
+            patch("os.path.exists", side_effect=lambda p: p == "/mnt/cache/data/test"),
+        ):
+            assert mkbrr_wizard.detect_storage_type("/mnt/user/data/test") == "ssd"
+
+    def test_unraid_fuse_path_unknown_falls_back_to_sysblock(
+        self, mkbrr_wizard: ModuleType
+    ) -> None:
+        with (
+            patch.object(
+                mkbrr_wizard,
+                "_unraid_candidate_roots",
+                return_value=["/mnt/disk5", "/mnt/cache"],
+            ),
+            patch("os.path.exists", return_value=False),
+            patch.object(mkbrr_wizard, "_detect_storage_type_sysblock", return_value="unknown"),
+        ):
+            assert mkbrr_wizard.detect_storage_type("/mnt/user/data/test") == "unknown"
+
     def test_sysblock_fallback_hdd(self, mkbrr_wizard: ModuleType) -> None:
         """Test /sys/block rotational detection returning HDD."""
         mock_stat = MagicMock()

@@ -567,6 +567,30 @@ def _unraid_candidate_roots() -> list[str]:
 
 _RE_UNRAID_HDD = re.compile(r"^/mnt/disk\d+(/|$)")
 _RE_UNRAID_SSD = re.compile(r"^/mnt/cache(?:-.+)?(/|$)")
+_RE_UNRAID_FUSE = re.compile(r"^/mnt/user(/|$)")
+
+
+def _resolve_unraid_fuse_path(path: str) -> str | None:
+    """Resolve /mnt/user paths to physical /mnt/diskN or /mnt/cache* mounts.
+
+    Returns the resolved physical path when found, otherwise None.
+    """
+    abs_path = os.path.abspath(path)
+    fuse_root = "/mnt/user"
+
+    if abs_path != fuse_root and not abs_path.startswith(f"{fuse_root}/"):
+        return None
+
+    relative = abs_path[len(fuse_root) :]
+    if not relative.startswith("/"):
+        relative = f"/{relative}"
+
+    for root in _unraid_candidate_roots():
+        candidate = f"{root}{relative}"
+        if os.path.exists(candidate):
+            return candidate
+
+    return None
 
 
 def _detect_storage_type_sysblock(path: str) -> str:
@@ -619,6 +643,16 @@ def detect_storage_type(path: str) -> str:
         return "hdd"
     if _RE_UNRAID_SSD.match(abs_path):
         return "ssd"
+
+    # Tier 1.5: Unraid FUSE path (/mnt/user) -> physical mount resolution
+    if _RE_UNRAID_FUSE.match(abs_path):
+        resolved = _resolve_unraid_fuse_path(abs_path)
+        if resolved:
+            if _RE_UNRAID_HDD.match(resolved):
+                return "hdd"
+            if _RE_UNRAID_SSD.match(resolved):
+                return "ssd"
+            return _detect_storage_type_sysblock(resolved)
 
     # Tier 2: /sys/block rotational flag (generic Linux)
     return _detect_storage_type_sysblock(abs_path)
