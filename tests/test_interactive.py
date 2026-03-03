@@ -1,5 +1,4 @@
-"""Tests for interactive prompts and confirm/choose.
-"""
+"""Tests for interactive prompts and confirm/choose."""
 
 from types import ModuleType
 from typing import Any

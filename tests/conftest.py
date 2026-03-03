@@ -38,6 +38,21 @@ def mkbrr_wizard():
     return _module
 
 
+class _Seq:
+    """Callable that returns successive items from a list.
+
+    Used in tests to script prompt answers.  The `__call__` method returns
+    the next item each time it is invoked.  If invoked more times than there
+    are available items it raises ``StopIteration``.
+    """
+
+    def __init__(self, items):
+        self._it = iter(items)
+
+    def __call__(self, *args, **kwargs):
+        return next(self._it)
+
+
 # Expose key functions for convenience (updated to new API)
 map_content_path = _module.map_content_path
 map_torrent_path = _module.map_torrent_path

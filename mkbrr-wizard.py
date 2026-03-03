@@ -646,9 +646,17 @@ def _resolve_host_path_for_detection(
     """
     if runtime == "native":
         return map_content_path(cfg, "native", raw_input)
-    # Docker mode: use host_data_root_override if available (Unraid-resolved)
+    # Docker mode: map container path -> host path.
+    # If Unraid provided an override root, preserve the subpath under
+    # container_data_root so we return the full host-side content path.
     if host_data_root_override:
-        return host_data_root_override
+        container_root = cfg.paths.container_data_root.rstrip("/")
+        override_root = host_data_root_override.rstrip("/")
+        if raw_input == container_root:
+            return override_root
+        if raw_input.startswith(container_root + "/"):
+            suffix = raw_input[len(container_root) :]
+            return f"{override_root}{suffix}"
     # Fallback: map container → host
     return map_content_path(cfg, "native", raw_input)
 
@@ -882,6 +890,185 @@ def preflight_unraid_split_share(
 
 
 # ----------------------------
+# Split series helpers
+# ----------------------------
+
+_VIDEO_EXTENSIONS = frozenset((".mkv", ".mp4", ".avi", ".ts", ".m2ts"))
+
+# Matches S01E02, s01e02, S01E01E02 (captures first episode number only)
+_EPISODE_RE = re.compile(r"S(\d{2,})E(\d{2,})", re.IGNORECASE)
+
+
+def scan_episodes(directory: str) -> list[tuple[int, str]]:
+    """Scan *directory* for video files with S##E## names.
+
+    Returns a sorted list of ``(episode_number, filename)`` tuples.
+    Only the **first** episode number in each filename is used (multi-episode
+    files like ``S01E01E02`` map to the first ``E##``).
+    Non-video files and files without an episode tag are silently skipped.
+    """
+    results: list[tuple[int, str]] = []
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return results
+
+    for name in entries:
+        full = os.path.join(directory, name)
+        if not os.path.isfile(full):
+            continue
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in _VIDEO_EXTENSIONS:
+            continue
+        m = _EPISODE_RE.search(name)
+        if m:
+            ep_num = int(m.group(2))
+            results.append((ep_num, name))
+
+    results.sort(key=lambda t: t[0])
+    return results
+
+
+def format_episode_ranges(episode_numbers: list[int]) -> str:
+    """Format a list of episode numbers into a compact range string.
+
+    Example: ``[1, 2, 3, 5, 6, 8]`` → ``"E01-E03, E05-E06, E08"``.
+    """
+    if not episode_numbers:
+        return ""
+    nums = sorted(episode_numbers)
+    ranges: list[str] = []
+    start = end = nums[0]
+    for n in nums[1:]:
+        if n == end + 1:
+            end = n
+        else:
+            if start == end:
+                ranges.append(f"E{start:02d}")
+            else:
+                ranges.append(f"E{start:02d}-E{end:02d}")
+            start = end = n
+    if start == end:
+        ranges.append(f"E{start:02d}")
+    else:
+        ranges.append(f"E{start:02d}-E{end:02d}")
+    return ", ".join(ranges)
+
+
+def parse_split_ranges(input_str: str, available: list[int]) -> list[list[int]]:
+    """Parse a user-supplied split specification into episode-number lists.
+
+    *input_str* uses range notation separated by ``,`` or ``;`` where each
+    range is ``start-end`` (inclusive).  Example: ``"1-11, 12-22"``.
+
+    Returns a list of lists — one per part — containing the episode numbers
+    that actually exist in *available*.
+
+    Raises ``ValueError`` on:
+    * overlapping ranges
+    * a range that references zero available episodes
+    * unparseable tokens
+    """
+    available_set = set(available)
+    parts: list[list[int]] = []
+    seen: set[int] = set()
+
+    # Normalize separators: "1-11; 12-22" -> "1-11, 12-22"
+    tokens = [t.strip() for t in re.split(r"[,;]+", input_str) if t.strip()]
+    if not tokens:
+        raise ValueError("No ranges provided")
+
+    for token in tokens:
+        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", token)
+        if not m:
+            raise ValueError(f"Invalid range token: '{token}' — expected e.g. '1-11'")
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if lo > hi:
+            raise ValueError(f"Invalid range: {lo}-{hi} (start > end)")
+
+        overlap = seen & set(range(lo, hi + 1))
+        if overlap:
+            raise ValueError(
+                f"Overlapping range: {token} — episode(s) {sorted(overlap)} already assigned"
+            )
+        seen.update(range(lo, hi + 1))
+
+        part_eps = sorted(ep for ep in range(lo, hi + 1) if ep in available_set)
+        if not part_eps:
+            raise ValueError(f"Range {lo}-{hi} contains no episodes found in folder")
+        parts.append(part_eps)
+
+    return parts
+
+
+def build_split_include_patterns(
+    episodes: list[tuple[int, str]], part_episodes: list[int]
+) -> list[str]:
+    """Build ``--include`` glob patterns that select exactly *part_episodes*.
+
+    Uses the ``S##E##`` tag extracted from each filename so the pattern is
+    precise (e.g. ``*S01E03*`` rather than a bare ``*E03*``).
+    """
+    # Build lookup: ep_num -> first matching filename
+    ep_map: dict[int, str] = {}
+    for ep_num, fname in episodes:
+        if ep_num not in ep_map:
+            ep_map[ep_num] = fname
+
+    patterns: list[str] = []
+    for ep in sorted(part_episodes):
+        ep_fname = ep_map.get(ep)
+        if ep_fname is None:
+            continue
+        m = _EPISODE_RE.search(ep_fname)
+        if m:
+            # e.g. "*S01E03*"
+            patterns.append(f"*{m.group(0)}*")
+    return patterns
+
+
+def split_output_name(folder_name: str, part_index: int) -> str:
+    """Generate an output ``.torrent`` filename for a split-series part.
+
+    Inserts ``.Part{N}`` before the ``.torrent`` extension.
+    *part_index* is 1-based.
+    """
+    base = folder_name.rstrip("/").rstrip("\\")
+    base = Path(base).name if base else "split"
+    return f"{base}.Part{part_index}.torrent"
+
+
+def render_split_summary(
+    folder_name: str,
+    parts: list[list[int]],
+    include_patterns: list[list[str]],
+    output_dir: str,
+) -> None:
+    """Print a rich summary table of the planned split-series jobs."""
+    table = Table(
+        title=f"Split Series — {len(parts)} parts",
+        box=box.SIMPLE,
+        show_lines=False,
+    )
+    table.add_column("Part", style="cyan", justify="right")
+    table.add_column("Episodes", style="bright_white")
+    table.add_column("# Files", justify="right")
+    table.add_column("Output", style="path")
+
+    for idx, (part_eps, patterns) in enumerate(zip(parts, include_patterns, strict=True), 1):
+        out_name = split_output_name(folder_name, idx)
+        out_path = str(Path(output_dir) / out_name)
+        table.add_row(
+            str(idx),
+            format_episode_ranges(part_eps),
+            str(len(patterns)),
+            out_path,
+        )
+
+    console.print(table)
+
+
+# ----------------------------
 # Docker command builder
 # ----------------------------
 
@@ -952,8 +1139,7 @@ def build_batch_job_create_command(
         preset,
         host_data_root_override=host_data_root_override,
     )
-    output_dir = str(Path(output_path).parent)
-    cmd += ["--output-dir", output_dir]
+    cmd += ["--output", output_path]
 
     trackers = job.get("trackers")
     if isinstance(trackers, list):
@@ -2016,73 +2202,265 @@ def main() -> None:
                     console.print(f"[err]❌ {e}[/]")
                     continue
 
-                # Build command.
-                # We avoid output flags entirely and rely on cwd / -w output_dir.
-                if runtime == "docker":
-                    cmd = docker_run_base(
-                        cfg,
-                        cfg.paths.container_output_dir,
-                        host_data_root_override=host_data_root_override,
-                    ) + [
-                        "create",
-                        content_path,
-                        "-P",
-                        preset,
-                        "--preset-file",
-                        cfg.presets_yaml_container,
-                    ]
-                    cwd = None
-                else:
-                    cmd = [
-                        cfg.mkbrr.binary,
-                        "create",
-                        content_path,
-                        "-P",
-                        preset,
-                        "--preset-file",
-                        cfg.presets_yaml_host,
-                    ]
-                    cwd = cfg.paths.host_output_dir
-
-                # Auto-tune workers based on storage type
-                host_path = _resolve_host_path_for_detection(
+                # --------------------------------------------------
+                # Split-series detection: scan for S##E## video files
+                # --------------------------------------------------
+                _did_split = False
+                # Use the host-side path for scanning — in Docker mode `raw` is
+                # a container path that doesn't exist on the host filesystem.
+                scan_dir = _resolve_host_path_for_detection(
                     cfg, runtime, raw, host_data_root_override
                 )
-                storage_type = detect_storage_type(host_path)
-                workers = resolve_workers(storage_type, cfg.workers)
-                if workers is not None:
-                    cmd += ["--workers", str(workers)]
+                episodes = scan_episodes(scan_dir) if os.path.isdir(scan_dir) else []
+                if episodes and len(episodes) >= 2:
+                    ep_nums = [ep for ep, _ in episodes]
                     console.print(
-                        f"[info]ℹ Storage detected as {storage_type.upper()} "
-                        f"→ --workers {workers}[/]"
+                        f"[info]ℹ Found {len(episodes)} episode(s): "
+                        f"{format_episode_ranges(ep_nums)}[/]"
                     )
-                else:
-                    console.print(
-                        f"[info]ℹ Storage detected as {storage_type.upper()} " f"→ workers auto[/]"
+                    do_split = cast(
+                        bool,
+                        Confirm.ask("Split this season into parts?", default=False),
                     )
+                    if do_split:
+                        # --- Collect split ranges ---
+                        while True:
+                            range_input = cast(
+                                str,
+                                Prompt.ask("Enter episode ranges [dim](e.g. 1-11, 12-22)[/]"),
+                            )
+                            try:
+                                parts = parse_split_ranges(range_input, ep_nums)
+                                break
+                            except ValueError as e:
+                                console.print(f"[err]❌ {e}[/]")
 
-                if confirm_cmd(cmd, cwd=cwd):
-                    t0 = time.monotonic()
-                    r = subprocess.run(cmd, cwd=cwd, check=False)
-                    elapsed = time.monotonic() - t0
-                    if r.returncode == 0:
-                        console.print("[ok]✅ mkbrr create finished.[/]")
-                        maybe_fix_torrent_permissions(cfg)
-                    else:
-                        console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
-                    notifier.notify(
-                        NotifyEvent(
-                            event_type="create",
-                            success=r.returncode == 0,
-                            title="Torrent Created" if r.returncode == 0 else "Create Failed",
-                            details={
-                                "path": raw,
-                                "preset": preset,
-                                "exit_code": r.returncode,
-                                "elapsed": elapsed,
-                            },
+                        # --- Build include patterns for each part ---
+                        all_patterns: list[list[str]] = []
+                        for part_eps in parts:
+                            pats = build_split_include_patterns(episodes, part_eps)
+                            all_patterns.append(pats)
+
+                        output_dir = cfg.paths.host_output_dir
+                        folder_name = Path(raw.rstrip("/").rstrip("\\")).name
+
+                        render_split_summary(folder_name, parts, all_patterns, output_dir)
+
+                        # --- Build batch jobs and preview first command ---
+                        split_jobs: list[dict[str, Any]] = []
+                        for idx, (_part_eps, pats) in enumerate(
+                            zip(parts, all_patterns, strict=True), 1
+                        ):
+                            out_name = split_output_name(folder_name, idx)
+                            host_out_path = str(Path(output_dir) / out_name)
+                            out_path = map_torrent_path(cfg, runtime, host_out_path)
+                            if out_path == host_out_path:
+                                content_fallback = map_content_path(cfg, runtime, host_out_path)
+                                if content_fallback != host_out_path:
+                                    out_path = content_fallback
+                            split_jobs.append(
+                                {
+                                    "path": content_path,
+                                    "output": out_path,
+                                    "include_patterns": pats,
+                                    "fail_on_season_warning": False,
+                                }
+                            )
+
+                        try:
+                            preview_cmd, preview_cwd = build_batch_job_create_command(
+                                cfg,
+                                runtime,
+                                preset,
+                                split_jobs[0],
+                                host_data_root_override=host_data_root_override,
+                            )
+                        except ValueError as e:
+                            console.print(f"[err]❌ {e}[/]")
+                            continue
+
+                        console.print(
+                            f"[info]About to run {len(split_jobs)} split-series job(s). "
+                            f"Showing Part 1 command preview.[/]"
                         )
+                        if not confirm_cmd(preview_cmd, cwd=preview_cwd):
+                            continue
+
+                        # --- Execute each part ---
+                        succeeded = 0
+                        failed = 0
+                        result_rows: list[tuple[int, str, str, int]] = []
+                        split_t0 = time.monotonic()
+
+                        for idx, job in enumerate(split_jobs, 1):
+                            try:
+                                cmd, cwd = build_batch_job_create_command(
+                                    cfg,
+                                    runtime,
+                                    preset,
+                                    job,
+                                    host_data_root_override=host_data_root_override,
+                                )
+                            except ValueError as e:
+                                failed += 1
+                                result_rows.append((idx, str(job["path"]), str(job["output"]), 2))
+                                console.print(f"[err]❌ Part {idx} invalid: {e}[/]")
+                                continue
+
+                            # Auto-tune workers
+                            job_host_path = _resolve_host_path_for_detection(
+                                cfg, runtime, raw, host_data_root_override
+                            )
+                            job_storage = detect_storage_type(job_host_path)
+                            job_workers = resolve_workers(job_storage, cfg.workers)
+                            if job_workers is not None:
+                                cmd += ["--workers", str(job_workers)]
+
+                            try:
+                                r = subprocess.run(
+                                    cmd,
+                                    cwd=cwd,
+                                    check=False,
+                                    timeout=cfg.batch.job_timeout_seconds,
+                                )
+                                result_rows.append(
+                                    (idx, str(job["path"]), str(job["output"]), r.returncode)
+                                )
+                                if r.returncode == 0:
+                                    succeeded += 1
+                                else:
+                                    failed += 1
+                                    console.print(
+                                        f"[err]❌ Part {idx} failed with exit code"
+                                        f" {r.returncode}[/]"
+                                    )
+                            except subprocess.TimeoutExpired:
+                                failed += 1
+                                result_rows.append((idx, str(job["path"]), str(job["output"]), 124))
+                                console.print(f"[err]❌ Part {idx} timed out[/]")
+
+                        # --- Results table ---
+                        results_table = Table(
+                            title=f"Split Series Results"
+                            f" (success={succeeded}, failed={failed})",
+                            box=box.SIMPLE,
+                            show_lines=False,
+                        )
+                        results_table.add_column("Part", style="cyan", justify="right")
+                        results_table.add_column("Path", style="path")
+                        results_table.add_column("Output", style="path")
+                        results_table.add_column("Code", justify="right")
+
+                        for idx, cp, op, code in result_rows:
+                            code_style = "ok" if code == 0 else "err"
+                            results_table.add_row(str(idx), cp, op, f"[{code_style}]{code}[/]")
+                        console.print(results_table)
+
+                        if succeeded > 0:
+                            console.print(
+                                f"[ok]✅ Split series completed with {succeeded}"
+                                f" successful part(s).[/]"
+                            )
+                            maybe_fix_torrent_permissions(cfg)
+                        else:
+                            console.print("[err]❌ Split series failed for all parts.[/]")
+
+                        split_elapsed = time.monotonic() - split_t0
+                        notifier.notify(
+                            NotifyEvent(
+                                event_type="batch",
+                                success=failed == 0,
+                                title=(
+                                    "Split Series Complete"
+                                    if failed == 0
+                                    else (
+                                        "Split Series Failed"
+                                        if succeeded == 0
+                                        else "Split Series Partial"
+                                    )
+                                ),
+                                details={
+                                    "succeeded": succeeded,
+                                    "failed": failed,
+                                    "result_rows": result_rows,
+                                    "elapsed": split_elapsed,
+                                },
+                            )
+                        )
+                        _did_split = True
+
+                if not _did_split:
+                    # Build command inline rather than via build_create_command because
+                    # single-create relies on cwd (native) / -w (docker) for output
+                    # placement and intentionally omits --output.  Splitting uses
+                    # build_batch_job_create_command which passes an explicit --output
+                    # path per part to avoid filename collisions.
+                    if runtime == "docker":
+                        cmd = docker_run_base(
+                            cfg,
+                            cfg.paths.container_output_dir,
+                            host_data_root_override=host_data_root_override,
+                        ) + [
+                            "create",
+                            content_path,
+                            "-P",
+                            preset,
+                            "--preset-file",
+                            cfg.presets_yaml_container,
+                        ]
+                        cwd = None
+                    else:
+                        cmd = [
+                            cfg.mkbrr.binary,
+                            "create",
+                            content_path,
+                            "-P",
+                            preset,
+                            "--preset-file",
+                            cfg.presets_yaml_host,
+                        ]
+                        cwd = cfg.paths.host_output_dir
+
+                    # Auto-tune workers based on storage type
+                    host_path = _resolve_host_path_for_detection(
+                        cfg, runtime, raw, host_data_root_override
                     )
+                    storage_type = detect_storage_type(host_path)
+                    workers = resolve_workers(storage_type, cfg.workers)
+                    if workers is not None:
+                        cmd += ["--workers", str(workers)]
+                        console.print(
+                            f"[info]ℹ Storage detected as {storage_type.upper()} "
+                            f"→ --workers {workers}[/]"
+                        )
+                    else:
+                        console.print(
+                            f"[info]ℹ Storage detected as {storage_type.upper()} "
+                            f"→ workers auto[/]"
+                        )
+
+                    if confirm_cmd(cmd, cwd=cwd):
+                        t0 = time.monotonic()
+                        r = subprocess.run(cmd, cwd=cwd, check=False)
+                        elapsed = time.monotonic() - t0
+                        if r.returncode == 0:
+                            console.print("[ok]✅ mkbrr create finished.[/]")
+                            maybe_fix_torrent_permissions(cfg)
+                        else:
+                            console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
+                        notifier.notify(
+                            NotifyEvent(
+                                event_type="create",
+                                success=r.returncode == 0,
+                                title=("Torrent Created" if r.returncode == 0 else "Create Failed"),
+                                details={
+                                    "path": raw,
+                                    "preset": preset,
+                                    "exit_code": r.returncode,
+                                    "elapsed": elapsed,
+                                },
+                            )
+                        )
 
             elif action == "batch":
                 preset = pick_preset(cfg)
@@ -2144,7 +2522,7 @@ def main() -> None:
 
                 succeeded = 0
                 failed = 0
-                result_rows: list[tuple[int, str, str, int]] = []
+                batch_result_rows: list[tuple[int, str, str, int]] = []
                 batch_t0 = time.monotonic()
 
                 for idx, job in enumerate(typed_jobs, 1):
@@ -2164,7 +2542,7 @@ def main() -> None:
                         )
                     except ValueError as e:
                         failed += 1
-                        result_rows.append((idx, content_path, output_path, 2))
+                        batch_result_rows.append((idx, content_path, output_path, 2))
                         console.print(f"[err]❌ Job {idx} preflight failed: {e}[/]")
                         continue
 
@@ -2178,7 +2556,7 @@ def main() -> None:
                         )
                     except ValueError as e:
                         failed += 1
-                        result_rows.append((idx, content_path, output_path, 2))
+                        batch_result_rows.append((idx, content_path, output_path, 2))
                         console.print(f"[err]❌ Job {idx} invalid: {e}[/]")
                         continue
 
@@ -2198,7 +2576,7 @@ def main() -> None:
                             check=False,
                             timeout=cfg.batch.job_timeout_seconds,
                         )
-                        result_rows.append((idx, content_path, output_path, r.returncode))
+                        batch_result_rows.append((idx, content_path, output_path, r.returncode))
 
                         if r.returncode == 0:
                             succeeded += 1
@@ -2209,7 +2587,7 @@ def main() -> None:
                             )
                     except subprocess.TimeoutExpired:
                         failed += 1
-                        result_rows.append((idx, content_path, output_path, 124))
+                        batch_result_rows.append((idx, content_path, output_path, 124))
                         timeout_msg = (
                             f" after {cfg.batch.job_timeout_seconds}s"
                             if cfg.batch.job_timeout_seconds is not None
@@ -2227,7 +2605,7 @@ def main() -> None:
                 results_table.add_column("Output", style="path")
                 results_table.add_column("Code", justify="right")
 
-                for idx, content_path, output_path, code in result_rows:
+                for idx, content_path, output_path, code in batch_result_rows:
                     code_style = "ok" if code == 0 else "err"
                     results_table.add_row(
                         str(idx),
@@ -2259,7 +2637,7 @@ def main() -> None:
                         details={
                             "succeeded": succeeded,
                             "failed": failed,
-                            "result_rows": result_rows,
+                            "result_rows": batch_result_rows,
                             "elapsed": batch_elapsed,
                         },
                     )

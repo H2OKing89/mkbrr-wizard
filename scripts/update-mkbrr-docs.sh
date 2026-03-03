@@ -112,7 +112,6 @@ for filename in "${!PAGES[@]}"; do
   # For files built from multiple URLs, concatenate with a separator
   combined=""
   for url in $urls; do
-    page_title=$(echo "$url" | sed 's/https:\/\/mkbrr.com\///; s/\.md$//; s/\// — /g')
     content=$(fetch_and_clean "$url")
     if [[ -n "$combined" ]]; then
       combined+=$'\n\n---\n\n'"$content"

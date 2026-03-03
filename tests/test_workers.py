@@ -301,6 +301,13 @@ class TestResolveHostPathForDetection:
         result = mkbrr_wizard._resolve_host_path_for_detection(
             cfg, "docker", "/data/test", "/mnt/disk5/data"
         )
+        assert result == "/mnt/disk5/data/test"
+
+    def test_docker_with_override_root_path(self, mkbrr_wizard: ModuleType) -> None:
+        cfg = self._make_cfg(mkbrr_wizard)
+        result = mkbrr_wizard._resolve_host_path_for_detection(
+            cfg, "docker", "/data", "/mnt/disk5/data"
+        )
         assert result == "/mnt/disk5/data"
 
     def test_docker_without_override_maps_to_host(self, mkbrr_wizard: ModuleType) -> None:

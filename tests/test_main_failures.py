@@ -3,17 +3,11 @@
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+from .conftest import _Seq
+
 
 def _mk_args(config_path: str) -> SimpleNamespace:
     return SimpleNamespace(config=config_path, docker=False, native=False)
-
-
-class _Seq:
-    def __init__(self, items):
-        self._it = iter(items)
-
-    def __call__(self, *args, **kwargs):
-        return next(self._it)
 
 
 def test_create_failure_native(tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:

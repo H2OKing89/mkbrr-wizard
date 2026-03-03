@@ -6,24 +6,11 @@ from typing import Any
 
 import pytest  # type: ignore[import-untyped]
 
+from .conftest import _Seq
+
 
 def _mk_args(config_path: str) -> SimpleNamespace:
     return SimpleNamespace(config=config_path, docker=False, native=False)
-
-
-class _Seq:
-    """Yield scripted prompt answers for tests.
-
-    The `_Seq.__call__` method returns the next item each time it is invoked.
-    If `_Seq.__call__` is invoked more times than available items, it raises
-    `StopIteration` (which can surface as `RuntimeError` in generator contexts).
-    """
-
-    def __init__(self, items):
-        self._it = iter(items)
-
-    def __call__(self, *args, **kwargs):
-        return next(self._it)
 
 
 def _sample_cfg(mkbrr_wizard: ModuleType, tmp_path: Path) -> Any:
@@ -216,7 +203,7 @@ def test_build_batch_job_create_command_native_and_docker(
     assert native_cmd[:2] == ["mkbrr", "create"]
     assert "-b" not in native_cmd
     assert "-P" in native_cmd
-    assert "--output-dir" in native_cmd
+    assert "--output" in native_cmd
     assert "--tracker" in native_cmd
     assert "--private" in native_cmd
     assert "--no-date" not in native_cmd
@@ -239,7 +226,7 @@ def test_build_batch_job_create_command_native_and_docker(
     assert docker_cmd[0] == "docker"
     assert "-b" not in docker_cmd
     assert "-P" in docker_cmd
-    assert "--output-dir" in docker_cmd
+    assert "--output" in docker_cmd
     assert docker_cwd is None
 
 
@@ -399,7 +386,7 @@ def test_main_batch_success_native(tmp_path, mkbrr_wizard: ModuleType, monkeypat
     assert cmd[1] == "create"
     assert "-b" not in cmd
     assert "-P" in cmd
-    assert "--output-dir" in cmd
+    assert "--output" in cmd
     assert chown_called["count"] == 1
 
 
@@ -455,7 +442,7 @@ def test_main_batch_success_docker(tmp_path, mkbrr_wizard: ModuleType, monkeypat
     assert cmd[0] == "docker"
     assert "-b" not in cmd
     assert "-P" in cmd
-    assert "--output-dir" in cmd
+    assert "--output" in cmd
     assert chown_called["count"] == 1
 
 
