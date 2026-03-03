@@ -214,6 +214,21 @@ class TestDetectStorageType:
         ):
             assert mkbrr_wizard.detect_storage_type("/mnt/user/data/test") == "unknown"
 
+    def test_unraid_fuse_resolved_nonstandard_mount_uses_sysblock(
+        self, mkbrr_wizard: ModuleType
+    ) -> None:
+        with (
+            patch.object(mkbrr_wizard, "_unraid_candidate_roots", return_value=["/mnt/remotes"]),
+            patch("os.path.exists", side_effect=lambda p: p == "/mnt/remotes/data/test"),
+            patch.object(
+                mkbrr_wizard,
+                "_detect_storage_type_sysblock",
+                return_value="ssd",
+            ) as mock_sysblock,
+        ):
+            assert mkbrr_wizard.detect_storage_type("/mnt/user/data/test") == "ssd"
+            mock_sysblock.assert_called_once_with("/mnt/remotes/data/test")
+
     def test_sysblock_fallback_hdd(self, mkbrr_wizard: ModuleType) -> None:
         """Test /sys/block rotational detection returning HDD."""
         mock_stat = MagicMock()

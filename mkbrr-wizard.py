@@ -570,13 +570,13 @@ _RE_UNRAID_SSD = re.compile(r"^/mnt/cache(?:-.+)?(/|$)")
 _RE_UNRAID_FUSE = re.compile(r"^/mnt/user(/|$)")
 
 
-def _resolve_unraid_fuse_path(path: str) -> str | None:
-    """Resolve /mnt/user paths to physical /mnt/diskN or /mnt/cache* mounts.
+def _resolve_fuse_path(fuse_root: str, path: str) -> str | None:
+    """Resolve a FUSE-mounted path to physical /mnt/diskN or /mnt/cache* mounts.
 
     Returns the resolved physical path when found, otherwise None.
     """
     abs_path = os.path.abspath(path)
-    fuse_root = "/mnt/user"
+    fuse_root = fuse_root.rstrip("/") or "/mnt/user"
 
     if abs_path != fuse_root and not abs_path.startswith(f"{fuse_root}/"):
         return None
@@ -591,6 +591,11 @@ def _resolve_unraid_fuse_path(path: str) -> str | None:
             return candidate
 
     return None
+
+
+def _resolve_unraid_fuse_path(path: str, fuse_root: str = "/mnt/user") -> str | None:
+    """Resolve Unraid FUSE paths to physical /mnt/diskN or /mnt/cache* mounts."""
+    return _resolve_fuse_path(fuse_root, path)
 
 
 def _detect_storage_type_sysblock(path: str) -> str:
@@ -702,20 +707,19 @@ def resolve_unraid_disk_path(cfg: AppCfg, raw: str) -> str:
         return raw
 
     abs_path = os.path.abspath(raw)
-    fuse_root = cfg.unraid.fuse_root.rstrip("/") or "/mnt/user"
+    fuse_root = cfg.unraid.fuse_root
+    normalized_fuse_root = fuse_root.rstrip("/") or "/mnt/user"
 
-    if abs_path != fuse_root and not abs_path.startswith(f"{fuse_root}/"):
+    resolved = _resolve_fuse_path(fuse_root, abs_path)
+    if (
+        resolved is None
+        and abs_path != normalized_fuse_root
+        and not abs_path.startswith(f"{normalized_fuse_root}/")
+    ):
         return abs_path
-
-    relative = abs_path[len(fuse_root) :]
-    if not relative.startswith("/"):
-        relative = f"/{relative}"
-
-    for root in _unraid_candidate_roots():
-        candidate = f"{root}{relative}"
-        if os.path.exists(candidate):
-            console.print(f"[info]ℹ Unraid resolved content path to:[/] {candidate}")
-            return candidate
+    if resolved:
+        console.print(f"[info][i] Unraid resolved content path to:[/] {resolved}")
+        return resolved
 
     console.print(f"[warn]⚠ Unraid path not found on disk/cache mounts:[/] {abs_path}")
     return abs_path
