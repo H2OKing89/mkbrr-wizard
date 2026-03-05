@@ -513,12 +513,17 @@ class TestNotificationManagerPolicy:
         mgr = mkbrr_wizard.NotificationManager(cfg)
         try:
             event = _make_event(mkbrr_wizard, success=True)
+            assert mgr._active is True
+
+            call_count = {"count": 0}
 
             def _raise_runtimeerror(*_: Any, **__: Any) -> None:
+                call_count["count"] += 1
                 raise RuntimeError("Event loop is closed")
 
             monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _raise_runtimeerror)
             mgr.notify(event)
+            assert call_count["count"] == 1
         finally:
             mgr.shutdown()
 

@@ -130,26 +130,10 @@ def test_ask_verbose_and_quiet(monkeypatch: Any, mkbrr_wizard: ModuleType) -> No
     assert mkbrr_wizard.ask_quiet() is False
 
 
-def test_detect_mkbrr_version_native(monkeypatch: Any, mkbrr_wizard: ModuleType) -> None:
-    cfg = mkbrr_wizard.AppCfg(
-        runtime="native",
-        docker_support=False,
-        chown=False,
-        docker_user=None,
-        mkbrr=mkbrr_wizard.MkbrrCfg(binary="mkbrr", image="ghcr.io/autobrr/mkbrr"),
-        paths=mkbrr_wizard.PathsCfg(
-            host_data_root="/mnt/user/data",
-            container_data_root="/data",
-            host_output_dir="/mnt/user/data/downloads/torrents/torrentfiles",
-            container_output_dir="/torrentfiles",
-            host_config_dir="/mnt/cache/appdata/mkbrr",
-            container_config_dir="/root/.config/mkbrr",
-        ),
-        ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
-        batch=mkbrr_wizard.BatchCfg(mode="simple"),
-        presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
-        presets_yaml_container="/root/.config/mkbrr/presets.yaml",
-    )
+def test_detect_mkbrr_version_native(
+    monkeypatch: Any, mkbrr_wizard: ModuleType, base_app_cfg: Any
+) -> None:
+    cfg = base_app_cfg(runtime="native", docker_support=False)
 
     monkeypatch.setattr(
         mkbrr_wizard.subprocess,
@@ -165,26 +149,10 @@ def test_detect_mkbrr_version_native(monkeypatch: Any, mkbrr_wizard: ModuleType)
     assert mkbrr_wizard.detect_mkbrr_version(cfg, "native") == "1.2.3"
 
 
-def test_detect_mkbrr_version_docker(monkeypatch: Any, mkbrr_wizard: ModuleType) -> None:
-    cfg = mkbrr_wizard.AppCfg(
-        runtime="docker",
-        docker_support=True,
-        chown=False,
-        docker_user="99:100",
-        mkbrr=mkbrr_wizard.MkbrrCfg(binary="mkbrr", image="ghcr.io/autobrr/mkbrr"),
-        paths=mkbrr_wizard.PathsCfg(
-            host_data_root="/mnt/user/data",
-            container_data_root="/data",
-            host_output_dir="/mnt/user/data/downloads/torrents/torrentfiles",
-            container_output_dir="/torrentfiles",
-            host_config_dir="/mnt/cache/appdata/mkbrr",
-            container_config_dir="/root/.config/mkbrr",
-        ),
-        ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
-        batch=mkbrr_wizard.BatchCfg(mode="simple"),
-        presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
-        presets_yaml_container="/root/.config/mkbrr/presets.yaml",
-    )
+def test_detect_mkbrr_version_docker(
+    monkeypatch: Any, mkbrr_wizard: ModuleType, base_app_cfg: Any
+) -> None:
+    cfg = base_app_cfg(runtime="docker", docker_support=True, docker_user="99:100")
 
     captured_cmd: dict[str, Any] = {}
 
@@ -205,27 +173,9 @@ def test_detect_mkbrr_version_docker(monkeypatch: Any, mkbrr_wizard: ModuleType)
 
 
 def test_detect_mkbrr_version_falls_back_after_failed_attempt(
-    monkeypatch: Any, mkbrr_wizard: ModuleType
+    monkeypatch: Any, mkbrr_wizard: ModuleType, base_app_cfg: Any
 ) -> None:
-    cfg = mkbrr_wizard.AppCfg(
-        runtime="native",
-        docker_support=False,
-        chown=False,
-        docker_user=None,
-        mkbrr=mkbrr_wizard.MkbrrCfg(binary="mkbrr", image="ghcr.io/autobrr/mkbrr"),
-        paths=mkbrr_wizard.PathsCfg(
-            host_data_root="/mnt/user/data",
-            container_data_root="/data",
-            host_output_dir="/mnt/user/data/downloads/torrents/torrentfiles",
-            container_output_dir="/torrentfiles",
-            host_config_dir="/mnt/cache/appdata/mkbrr",
-            container_config_dir="/root/.config/mkbrr",
-        ),
-        ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
-        batch=mkbrr_wizard.BatchCfg(mode="simple"),
-        presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
-        presets_yaml_container="/root/.config/mkbrr/presets.yaml",
-    )
+    cfg = base_app_cfg(runtime="native", docker_support=False)
 
     calls: list[list[str]] = []
 
@@ -251,26 +201,10 @@ def test_detect_mkbrr_version_falls_back_after_failed_attempt(
     assert calls == [["mkbrr", "version"], ["mkbrr", "--version"]]
 
 
-def test_detect_mkbrr_version_strips_v_prefix(monkeypatch: Any, mkbrr_wizard: ModuleType) -> None:
-    cfg = mkbrr_wizard.AppCfg(
-        runtime="docker",
-        docker_support=True,
-        chown=False,
-        docker_user=None,
-        mkbrr=mkbrr_wizard.MkbrrCfg(binary="mkbrr", image="ghcr.io/autobrr/mkbrr"),
-        paths=mkbrr_wizard.PathsCfg(
-            host_data_root="/mnt/user/data",
-            container_data_root="/data",
-            host_output_dir="/mnt/user/data/downloads/torrents/torrentfiles",
-            container_output_dir="/torrentfiles",
-            host_config_dir="/mnt/cache/appdata/mkbrr",
-            container_config_dir="/root/.config/mkbrr",
-        ),
-        ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
-        batch=mkbrr_wizard.BatchCfg(mode="simple"),
-        presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
-        presets_yaml_container="/root/.config/mkbrr/presets.yaml",
-    )
+def test_detect_mkbrr_version_strips_v_prefix(
+    monkeypatch: Any, mkbrr_wizard: ModuleType, base_app_cfg: Any
+) -> None:
+    cfg = base_app_cfg(runtime="docker", docker_support=True)
 
     monkeypatch.setattr(
         mkbrr_wizard.subprocess,
@@ -284,3 +218,69 @@ def test_detect_mkbrr_version_strips_v_prefix(monkeypatch: Any, mkbrr_wizard: Mo
     )
 
     assert mkbrr_wizard.detect_mkbrr_version(cfg, "docker") == "1.20.0"
+
+
+def test_detect_mkbrr_version_timeout_expired(
+    monkeypatch: Any, mkbrr_wizard: ModuleType, base_app_cfg: Any
+) -> None:
+    cfg = base_app_cfg(runtime="native", docker_support=False)
+
+    monkeypatch.setattr(
+        mkbrr_wizard.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd="mkbrr", timeout=8)),
+    )
+
+    assert mkbrr_wizard.detect_mkbrr_version(cfg, "native") == "unknown"
+
+
+def test_detect_mkbrr_version_generic_exception(
+    monkeypatch: Any, mkbrr_wizard: ModuleType, base_app_cfg: Any
+) -> None:
+    cfg = base_app_cfg(runtime="native", docker_support=False)
+
+    monkeypatch.setattr(
+        mkbrr_wizard.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(Exception("boom")),
+    )
+
+    assert mkbrr_wizard.detect_mkbrr_version(cfg, "native") == "unknown"
+
+
+def test_detect_mkbrr_version_all_candidates_fail_return_unknown(
+    monkeypatch: Any, mkbrr_wizard: ModuleType, base_app_cfg: Any
+) -> None:
+    cfg = base_app_cfg(runtime="native", docker_support=False)
+
+    monkeypatch.setattr(
+        mkbrr_wizard.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            args=["mkbrr"],
+            returncode=1,
+            stdout="",
+            stderr="error",
+        ),
+    )
+
+    assert mkbrr_wizard.detect_mkbrr_version(cfg, "native") == "unknown"
+
+
+def test_detect_mkbrr_version_uses_stderr_when_stdout_empty(
+    monkeypatch: Any, mkbrr_wizard: ModuleType, base_app_cfg: Any
+) -> None:
+    cfg = base_app_cfg(runtime="native", docker_support=False)
+
+    monkeypatch.setattr(
+        mkbrr_wizard.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            args=["mkbrr", "version"],
+            returncode=0,
+            stdout="",
+            stderr="mkbrr version: v3.4.5\n",
+        ),
+    )
+
+    assert mkbrr_wizard.detect_mkbrr_version(cfg, "native") == "3.4.5"

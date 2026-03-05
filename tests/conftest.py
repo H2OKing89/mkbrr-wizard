@@ -38,6 +38,36 @@ def mkbrr_wizard():
     return _module
 
 
+@pytest.fixture
+def base_app_cfg(mkbrr_wizard):
+    """Factory fixture returning AppCfg with shared defaults and optional overrides."""
+
+    def _factory(**overrides):
+        cfg_values = {
+            "runtime": "native",
+            "docker_support": False,
+            "chown": False,
+            "docker_user": None,
+            "mkbrr": mkbrr_wizard.MkbrrCfg(binary="mkbrr", image="ghcr.io/autobrr/mkbrr"),
+            "paths": mkbrr_wizard.PathsCfg(
+                host_data_root="/mnt/user/data",
+                container_data_root="/data",
+                host_output_dir="/mnt/user/data/downloads/torrents/torrentfiles",
+                container_output_dir="/torrentfiles",
+                host_config_dir="/mnt/cache/appdata/mkbrr",
+                container_config_dir="/root/.config/mkbrr",
+            ),
+            "ownership": mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
+            "batch": mkbrr_wizard.BatchCfg(mode="simple"),
+            "presets_yaml_host": "/mnt/cache/appdata/mkbrr/presets.yaml",
+            "presets_yaml_container": "/root/.config/mkbrr/presets.yaml",
+        }
+        cfg_values.update(overrides)
+        return mkbrr_wizard.AppCfg(**cfg_values)
+
+    return _factory
+
+
 class _Seq:
     """Callable that returns successive items from a list.
 

@@ -2278,8 +2278,14 @@ class NotificationManager:
         try:
             drain_future = asyncio.run_coroutine_threadsafe(drain_coro, loop)
             drain_future.result(timeout=timeout)
-        except (RuntimeError, TimeoutError):
+        except RuntimeError:
             drain_coro.close()
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except RuntimeError:
+                pass
+        except TimeoutError:
+            drain_future.cancel()
             try:
                 loop.call_soon_threadsafe(loop.stop)
             except RuntimeError:
