@@ -70,6 +70,47 @@ def test_resolve_unraid_disk_path_finds_cache(
     assert resolved == "/mnt/cache/data/downloads/test.mkv"
 
 
+def test_resolve_unraid_disk_path_cache_first_prefers_cache(
+    mkbrr_wizard: ModuleType, unraid_cfg: Any, monkeypatch: Any
+) -> None:
+    cache_first_cfg = mkbrr_wizard.AppCfg(
+        runtime=unraid_cfg.runtime,
+        docker_support=unraid_cfg.docker_support,
+        chown=unraid_cfg.chown,
+        docker_user=unraid_cfg.docker_user,
+        mkbrr=unraid_cfg.mkbrr,
+        paths=unraid_cfg.paths,
+        ownership=unraid_cfg.ownership,
+        batch=unraid_cfg.batch,
+        presets_yaml_host=unraid_cfg.presets_yaml_host,
+        presets_yaml_container=unraid_cfg.presets_yaml_container,
+        unraid=mkbrr_wizard.UnraidCfg(
+            enabled=True,
+            fuse_root="/mnt/user",
+            mount_priority="cache_first",
+        ),
+    )
+
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "_unraid_candidate_roots",
+        lambda cache_first=False: (
+            ["/mnt/cache", "/mnt/disk5"] if cache_first else ["/mnt/disk5", "/mnt/cache"]
+        ),
+    )
+    monkeypatch.setattr(
+        mkbrr_wizard.os.path,
+        "exists",
+        lambda p: p in {"/mnt/disk5/data/downloads/test.mkv", "/mnt/cache/data/downloads/test.mkv"},
+    )
+
+    resolved = mkbrr_wizard.resolve_unraid_disk_path(
+        cache_first_cfg, "/mnt/user/data/downloads/test.mkv"
+    )
+
+    assert resolved == "/mnt/cache/data/downloads/test.mkv"
+
+
 def test_resolve_unraid_disk_path_non_unraid_path_unchanged(
     mkbrr_wizard: ModuleType, unraid_cfg: Any
 ) -> None:
@@ -186,6 +227,31 @@ def test_candidate_roots_natural_sort(mkbrr_wizard: ModuleType, monkeypatch: Any
     assert roots == ["/mnt/disk1", "/mnt/disk2", "/mnt/disk10", "/mnt/cache", "/mnt/cache-temp"]
 
 
+def test_candidate_roots_cache_first_order(mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:
+    class _Entry:
+        def __init__(self, path: str):
+            self.path = path
+
+        def is_dir(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        mkbrr_wizard.os,
+        "scandir",
+        lambda _: iter(
+            [
+                _Entry("/mnt/disk2"),
+                _Entry("/mnt/cache-temp"),
+                _Entry("/mnt/disk1"),
+                _Entry("/mnt/cache"),
+            ]
+        ),
+    )
+
+    roots = mkbrr_wizard._unraid_candidate_roots(cache_first=True)
+    assert roots == ["/mnt/cache", "/mnt/cache-temp", "/mnt/disk1", "/mnt/disk2"]
+
+
 def test_detect_split_share_mismatch_file_missing(
     mkbrr_wizard: ModuleType, monkeypatch: Any
 ) -> None:
@@ -292,3 +358,64 @@ def test_preflight_split_share_native_derives_original(
 
     assert captured["original"] == "/mnt/user/data/downloads/pack"
     assert captured["resolved"] == "/mnt/disk14/data/downloads/pack"
+
+
+def test_preflight_split_share_unmapped_docker_path_fail_raises(
+    mkbrr_wizard: ModuleType, unraid_cfg: Any
+) -> None:
+    fail_cfg = mkbrr_wizard.AppCfg(
+        runtime=unraid_cfg.runtime,
+        docker_support=unraid_cfg.docker_support,
+        chown=unraid_cfg.chown,
+        docker_user=unraid_cfg.docker_user,
+        mkbrr=unraid_cfg.mkbrr,
+        paths=unraid_cfg.paths,
+        ownership=unraid_cfg.ownership,
+        batch=unraid_cfg.batch,
+        presets_yaml_host=unraid_cfg.presets_yaml_host,
+        presets_yaml_container=unraid_cfg.presets_yaml_container,
+        unraid=mkbrr_wizard.UnraidCfg(
+            enabled=True,
+            fuse_root="/mnt/user",
+            split_share_unmapped_docker_path="fail",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="outside /data"):
+        mkbrr_wizard.preflight_unraid_split_share(
+            fail_cfg,
+            runtime="docker",
+            content_path="/mnt/user/data/downloads/pack",
+            host_data_root_override=None,
+            context="batch job 1",
+        )
+
+
+def test_preflight_split_share_unmapped_docker_path_warn_no_raise(
+    mkbrr_wizard: ModuleType, unraid_cfg: Any
+) -> None:
+    warn_cfg = mkbrr_wizard.AppCfg(
+        runtime=unraid_cfg.runtime,
+        docker_support=unraid_cfg.docker_support,
+        chown=unraid_cfg.chown,
+        docker_user=unraid_cfg.docker_user,
+        mkbrr=unraid_cfg.mkbrr,
+        paths=unraid_cfg.paths,
+        ownership=unraid_cfg.ownership,
+        batch=unraid_cfg.batch,
+        presets_yaml_host=unraid_cfg.presets_yaml_host,
+        presets_yaml_container=unraid_cfg.presets_yaml_container,
+        unraid=mkbrr_wizard.UnraidCfg(
+            enabled=True,
+            fuse_root="/mnt/user",
+            split_share_unmapped_docker_path="warn",
+        ),
+    )
+
+    mkbrr_wizard.preflight_unraid_split_share(
+        warn_cfg,
+        runtime="docker",
+        content_path="/mnt/user/data/downloads/pack",
+        host_data_root_override=None,
+        context="create",
+    )

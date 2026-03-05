@@ -214,6 +214,23 @@ class TestDetectStorageType:
         ):
             assert mkbrr_wizard.detect_storage_type("/mnt/user/data/test") == "unknown"
 
+    def test_custom_fuse_root_path_resolves(self, mkbrr_wizard: ModuleType) -> None:
+        with (
+            patch.object(
+                mkbrr_wizard,
+                "_unraid_candidate_roots",
+                return_value=["/mnt/cache", "/mnt/disk5"],
+            ),
+            patch("os.path.exists", side_effect=lambda p: p == "/mnt/cache/data/test"),
+        ):
+            assert (
+                mkbrr_wizard.detect_storage_type(
+                    "/mnt/media/data/test",
+                    fuse_root="/mnt/media",
+                )
+                == "ssd"
+            )
+
     def test_unraid_fuse_resolved_nonstandard_mount_uses_sysblock(
         self, mkbrr_wizard: ModuleType
     ) -> None:

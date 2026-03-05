@@ -191,7 +191,9 @@ class BatchCfg:
 class UnraidCfg:
     enabled: bool = False
     fuse_root: str = "/mnt/user"
+    mount_priority: str = "disk_first"  # disk_first|cache_first
     split_share_preflight: str = "fail"  # off|warn|fail
+    split_share_unmapped_docker_path: str = "warn"  # off|warn|fail
     split_share_max_entries: int = 20000
     split_share_follow_symlinks: bool = False
 
@@ -322,9 +324,19 @@ def load_config(path: Path) -> AppCfg:
     batch = BatchCfg(mode=batch_mode, job_timeout_seconds=job_timeout_seconds)
 
     unraid_node: dict[str, Any] = cast(dict[str, Any], raw.get("unraid") or {})
+    mount_priority = str(unraid_node.get("mount_priority", "disk_first")).strip().lower()
+    if mount_priority not in ("disk_first", "cache_first"):
+        raise ValueError("unraid.mount_priority must be one of: disk_first, cache_first")
+
     preflight_mode = str(unraid_node.get("split_share_preflight", "fail")).strip().lower()
     if preflight_mode not in ("off", "warn", "fail"):
         raise ValueError("unraid.split_share_preflight must be one of: off, warn, fail")
+
+    unmapped_docker_path_mode = (
+        str(unraid_node.get("split_share_unmapped_docker_path", "warn")).strip().lower()
+    )
+    if unmapped_docker_path_mode not in ("off", "warn", "fail"):
+        raise ValueError("unraid.split_share_unmapped_docker_path must be one of: off, warn, fail")
 
     split_share_max_entries = int(unraid_node.get("split_share_max_entries", 20000))
     if split_share_max_entries <= 0:
@@ -333,7 +345,9 @@ def load_config(path: Path) -> AppCfg:
     unraid = UnraidCfg(
         enabled=_coerce_bool(unraid_node.get("enabled", False), False),
         fuse_root=_expand_path(str(unraid_node.get("fuse_root", "/mnt/user"))).rstrip("/"),
+        mount_priority=mount_priority,
         split_share_preflight=preflight_mode,
+        split_share_unmapped_docker_path=unmapped_docker_path_mode,
         split_share_max_entries=split_share_max_entries,
         split_share_follow_symlinks=_coerce_bool(
             unraid_node.get("split_share_follow_symlinks", False), False
@@ -479,6 +493,57 @@ def pick_runtime(cfg: AppCfg, forced: str | None) -> str:
     )
 
 
+def detect_mkbrr_version(cfg: AppCfg, runtime: str) -> str:
+    """Best-effort mkbrr version string for the active runtime."""
+
+    def _shorten_version_line(line: str) -> str:
+        m = re.search(r"(?<![0-9A-Za-z])[vV]?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)", line)
+        if m:
+            return m.group(1)
+        return line
+
+    if runtime == "docker":
+        base_cmd: list[str] = ["docker", "run", "--rm"]
+        if cfg.docker_user:
+            base_cmd += ["--user", cfg.docker_user]
+        candidates = [
+            base_cmd + [cfg.mkbrr.image, "mkbrr", "version"],
+            base_cmd + [cfg.mkbrr.image, "mkbrr", "--version"],
+        ]
+    else:
+        candidates = [
+            [cfg.mkbrr.binary, "version"],
+            [cfg.mkbrr.binary, "--version"],
+        ]
+
+    for cmd in candidates:
+        try:
+            r = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=8,
+            )
+        except Exception:
+            continue
+
+        if int(getattr(r, "returncode", 1)) != 0:
+            continue
+
+        stdout_text = str(getattr(r, "stdout", "") or "")
+        stderr_text = str(getattr(r, "stderr", "") or "")
+        output = stdout_text.strip() or stderr_text.strip()
+        if not output:
+            continue
+
+        first_line = output.splitlines()[0].strip()
+        if first_line:
+            return _shorten_version_line(first_line)
+
+    return "unknown"
+
+
 # ----------------------------
 # Path mapping (content + torrent files)
 # ----------------------------
@@ -548,7 +613,7 @@ def _natural_disk_sort_key(path: str) -> tuple[int, str]:
     return (int(match.group(1)), name)
 
 
-def _unraid_candidate_roots() -> list[str]:
+def _unraid_candidate_roots(cache_first: bool = False) -> list[str]:
     try:
         entries = [entry.path for entry in os.scandir("/mnt") if entry.is_dir()]
     except OSError:
@@ -558,6 +623,8 @@ def _unraid_candidate_roots() -> list[str]:
     cache_roots = [p for p in entries if re.fullmatch(r"cache(?:-.+)?", os.path.basename(p))]
     disk_roots.sort(key=_natural_disk_sort_key)
     cache_roots.sort()
+    if cache_first:
+        return cache_roots + disk_roots
     return disk_roots + cache_roots
 
 
@@ -570,7 +637,7 @@ _RE_UNRAID_SSD = re.compile(r"^/mnt/cache(?:-.+)?(/|$)")
 _RE_UNRAID_FUSE = re.compile(r"^/mnt/user(/|$)")
 
 
-def _resolve_fuse_path(fuse_root: str, path: str) -> str | None:
+def _resolve_fuse_path(fuse_root: str, path: str, mount_priority: str = "disk_first") -> str | None:
     """Resolve a FUSE-mounted path to physical /mnt/diskN or /mnt/cache* mounts.
 
     Returns the resolved physical path when found, otherwise None.
@@ -585,7 +652,12 @@ def _resolve_fuse_path(fuse_root: str, path: str) -> str | None:
     if not relative.startswith("/"):
         relative = f"/{relative}"
 
-    for root in _unraid_candidate_roots():
+    if mount_priority == "cache_first":
+        roots = _unraid_candidate_roots(cache_first=True)
+    else:
+        roots = _unraid_candidate_roots()
+
+    for root in roots:
         candidate = f"{root}{relative}"
         if os.path.exists(candidate):
             return candidate
@@ -593,9 +665,11 @@ def _resolve_fuse_path(fuse_root: str, path: str) -> str | None:
     return None
 
 
-def _resolve_unraid_fuse_path(path: str, fuse_root: str = "/mnt/user") -> str | None:
+def _resolve_unraid_fuse_path(
+    path: str, fuse_root: str = "/mnt/user", mount_priority: str = "disk_first"
+) -> str | None:
     """Resolve Unraid FUSE paths to physical /mnt/diskN or /mnt/cache* mounts."""
-    return _resolve_fuse_path(fuse_root, path)
+    return _resolve_fuse_path(fuse_root, path, mount_priority=mount_priority)
 
 
 def _detect_storage_type_sysblock(path: str) -> str:
@@ -631,7 +705,11 @@ def _detect_storage_type_sysblock(path: str) -> str:
     return "unknown"
 
 
-def detect_storage_type(path: str) -> str:
+def detect_storage_type(
+    path: str,
+    fuse_root: str = "/mnt/user",
+    mount_priority: str = "disk_first",
+) -> str:
     """Detect whether *path* resides on HDD or SSD.
 
     Detection tiers:
@@ -649,9 +727,14 @@ def detect_storage_type(path: str) -> str:
     if _RE_UNRAID_SSD.match(abs_path):
         return "ssd"
 
-    # Tier 1.5: Unraid FUSE path (/mnt/user) -> physical mount resolution
-    if _RE_UNRAID_FUSE.match(abs_path):
-        resolved = _resolve_unraid_fuse_path(abs_path)
+    # Tier 1.5: Unraid FUSE path -> physical mount resolution
+    normalized_fuse_root = fuse_root.rstrip("/") or "/mnt/user"
+    if abs_path == normalized_fuse_root or abs_path.startswith(f"{normalized_fuse_root}/"):
+        resolved = _resolve_unraid_fuse_path(
+            abs_path,
+            fuse_root=normalized_fuse_root,
+            mount_priority=mount_priority,
+        )
         if resolved:
             if _RE_UNRAID_HDD.match(resolved):
                 return "hdd"
@@ -710,7 +793,7 @@ def resolve_unraid_disk_path(cfg: AppCfg, raw: str) -> str:
     fuse_root = cfg.unraid.fuse_root
     normalized_fuse_root = fuse_root.rstrip("/") or "/mnt/user"
 
-    resolved = _resolve_fuse_path(fuse_root, abs_path)
+    resolved = _resolve_fuse_path(fuse_root, abs_path, mount_priority=cfg.unraid.mount_priority)
     if (
         resolved is None
         and abs_path != normalized_fuse_root
@@ -850,6 +933,18 @@ def preflight_unraid_split_share(
         mapped = content_path.strip()
         container_root = cfg.paths.container_data_root.rstrip("/")
         if mapped != container_root and not mapped.startswith(container_root + "/"):
+            mode_unmapped = cfg.unraid.split_share_unmapped_docker_path
+            if mode_unmapped == "off":
+                return
+
+            msg = (
+                f"Unraid preflight ({context}) skipped: docker content path is outside "
+                f"{container_root}: {mapped}\n"
+                "Use a mapped container path under the data root to enable split-share validation."
+            )
+            if mode_unmapped == "fail":
+                raise ValueError(msg)
+            console.print(f"[warn]⚠ {msg}[/]")
             return
 
         relative = mapped[len(container_root) :]
@@ -1167,6 +1262,8 @@ def build_batch_job_create_command(
     """Return (cmd, cwd) for a single batch job executed via mkbrr create."""
     content_path = str(job.get("path", "")).strip()
     output_path = str(job.get("output", "")).strip()
+    if not content_path:
+        raise ValueError("Batch job content path cannot be empty")
     if not output_path:
         raise ValueError("Batch job output path cannot be empty")
 
@@ -2095,8 +2192,13 @@ class NotificationManager:
         if policy == "failures_only" and event.success:
             return
         # "summary" = always send
-
-        asyncio.run_coroutine_threadsafe(self._dispatch(event), self._loop)
+        dispatch_coro = self._dispatch(event)
+        try:
+            asyncio.run_coroutine_threadsafe(dispatch_coro, self._loop)
+        except RuntimeError:
+            dispatch_coro.close()
+            # Loop is shutting down; ignore late notifications quietly.
+            return
 
     async def _dispatch(self, event: NotifyEvent) -> None:
         """Gather provider tasks concurrently."""
@@ -2172,16 +2274,27 @@ class NotificationManager:
                 self._http_client = None
             loop.stop()
 
-        asyncio.run_coroutine_threadsafe(_drain(), loop)
-        thread.join(timeout=timeout)
+        drain_coro = _drain()
+        try:
+            drain_future = asyncio.run_coroutine_threadsafe(drain_coro, loop)
+            drain_future.result(timeout=timeout)
+        except (RuntimeError, TimeoutError):
+            drain_coro.close()
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except RuntimeError:
+                pass
+        finally:
+            thread.join(timeout=timeout)
 
 
-def render_header(cfg: AppCfg, runtime: str) -> None:
+def render_header(cfg: AppCfg, runtime: str, mkbrr_version: str = "unknown") -> None:
     """Render a stylish startup header using Rich."""
     table = Table(show_header=False, box=None, padding=(0, 1))
     table.add_column("key", style="cyan")
     table.add_column("val")
     table.add_row("Runtime", f"[bold]{runtime}[/]")
+    table.add_row("mkbrr", mkbrr_version)
     table.add_row("Docker", f"{cfg.docker_support} (user={cfg.docker_user or 'none'})")
     table.add_row("Unraid", f"{cfg.unraid.enabled} (fuse_root={cfg.unraid.fuse_root})")
     table.add_row("Presets", cfg.presets_yaml_host)
@@ -2202,8 +2315,11 @@ def main() -> None:
 
     forced = "docker" if args.docker else "native" if args.native else None
     runtime = pick_runtime(cfg, forced)
+    mkbrr_version = "unknown"
+    if sys.stdin.isatty():
+        mkbrr_version = detect_mkbrr_version(cfg, runtime)
 
-    render_header(cfg, runtime)
+    render_header(cfg, runtime, mkbrr_version=mkbrr_version)
 
     notifier = NotificationManager(cfg.notifications)
 
@@ -2349,7 +2465,11 @@ def main() -> None:
                             job_host_path = _resolve_host_path_for_detection(
                                 cfg, runtime, raw, host_data_root_override
                             )
-                            job_storage = detect_storage_type(job_host_path)
+                            job_storage = detect_storage_type(
+                                job_host_path,
+                                fuse_root=cfg.unraid.fuse_root,
+                                mount_priority=cfg.unraid.mount_priority,
+                            )
                             job_workers = resolve_workers(job_storage, cfg.workers)
                             if job_workers is not None:
                                 cmd += ["--workers", str(job_workers)]
@@ -2463,7 +2583,11 @@ def main() -> None:
                     host_path = _resolve_host_path_for_detection(
                         cfg, runtime, raw, host_data_root_override
                     )
-                    storage_type = detect_storage_type(host_path)
+                    storage_type = detect_storage_type(
+                        host_path,
+                        fuse_root=cfg.unraid.fuse_root,
+                        mount_priority=cfg.unraid.mount_priority,
+                    )
                     workers = resolve_workers(storage_type, cfg.workers)
                     if workers is not None:
                         cmd += ["--workers", str(workers)]
@@ -2602,7 +2726,11 @@ def main() -> None:
                     job_host_path = _resolve_host_path_for_detection(
                         cfg, runtime, content_path, job_override
                     )
-                    job_storage = detect_storage_type(job_host_path)
+                    job_storage = detect_storage_type(
+                        job_host_path,
+                        fuse_root=cfg.unraid.fuse_root,
+                        mount_priority=cfg.unraid.mount_priority,
+                    )
                     job_workers = resolve_workers(job_storage, cfg.workers)
                     if job_workers is not None:
                         cmd += ["--workers", str(job_workers)]
@@ -2741,7 +2869,11 @@ def main() -> None:
                 # If user chose auto, apply storage-type detection
                 if workers is None:
                     check_host_path = _resolve_host_path_for_detection(cfg, runtime, raw_c, None)
-                    check_storage = detect_storage_type(check_host_path)
+                    check_storage = detect_storage_type(
+                        check_host_path,
+                        fuse_root=cfg.unraid.fuse_root,
+                        mount_priority=cfg.unraid.mount_priority,
+                    )
                     workers = resolve_workers(check_storage, cfg.workers)
                     if workers is not None:
                         console.print(

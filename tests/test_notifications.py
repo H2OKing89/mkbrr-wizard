@@ -501,6 +501,27 @@ class TestNotificationManagerPolicy:
             "Final Summary" in call_log
         ), "shutdown() must drain pending notifications before stopping the loop"
 
+    def test_notify_ignores_runtimeerror_when_loop_closing(
+        self, mkbrr_wizard: ModuleType, monkeypatch: Any
+    ) -> None:
+        cfg = _make_notif_cfg(
+            mkbrr_wizard,
+            enabled=True,
+            policy="summary",
+            pushover_enabled=True,
+        )
+        mgr = mkbrr_wizard.NotificationManager(cfg)
+        try:
+            event = _make_event(mkbrr_wizard, success=True)
+
+            def _raise_runtimeerror(*_: Any, **__: Any) -> None:
+                raise RuntimeError("Event loop is closed")
+
+            monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _raise_runtimeerror)
+            mgr.notify(event)
+        finally:
+            mgr.shutdown()
+
 
 # ---------------------------------------------------------------------------
 # NotificationManager HTTP dispatch tests (mocked)

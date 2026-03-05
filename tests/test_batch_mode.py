@@ -230,6 +230,23 @@ def test_build_batch_job_create_command_native_and_docker(
     assert docker_cwd is None
 
 
+def test_build_batch_job_create_command_rejects_empty_content_path(
+    mkbrr_wizard: ModuleType, tmp_path: Path
+) -> None:
+    cfg = _sample_cfg(mkbrr_wizard, tmp_path)
+
+    with pytest.raises(ValueError, match="Batch job content path cannot be empty"):
+        mkbrr_wizard.build_batch_job_create_command(
+            cfg,
+            "native",
+            "btn",
+            {
+                "path": "   ",
+                "output": str(tmp_path / "out.torrent"),
+            },
+        )
+
+
 def test_default_batch_output_path_uses_host_output_dir(
     mkbrr_wizard: ModuleType, tmp_path: Path
 ) -> None:

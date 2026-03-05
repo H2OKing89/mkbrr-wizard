@@ -12,11 +12,23 @@ unraid:
   # Enable to resolve /mnt/user/* paths to physical /mnt/diskN/* or /mnt/cache* mounts.
   enabled: false
   fuse_root: /mnt/user
+
+  # mount_priority: disk_first|cache_first
+  # - disk_first : prefer /mnt/diskN when both disk and cache contain the same relative path
+  # - cache_first: prefer /mnt/cache* first
+  mount_priority: disk_first
+
   # split_share_preflight: off|warn|fail
   # - fail: abort before mkbrr when files are split across disks for this path
   # - warn: print warning and continue
   # - off : disable this preflight
   split_share_preflight: fail
+
+  # When runtime=docker and the job path is outside container_data_root (e.g. still /mnt/user/...)
+  # split-share preflight cannot safely map/scan the path.
+  # split_share_unmapped_docker_path: off|warn|fail
+  split_share_unmapped_docker_path: warn
+
   # Upper bound for files scanned during split-share detection (to avoid huge tree scans)
   split_share_max_entries: 20000
   split_share_follow_symlinks: false

@@ -132,6 +132,32 @@ batch:
 - `simple` (default): asks only preset, job count, content path, and output path.
 - `advanced`: also asks per-job optional fields (`trackers`, `private`, `piece_length`, etc.).
 
+### Unraid Options
+
+Configure Unraid-specific path and split-share behavior in `config.yaml`:
+
+```yaml
+unraid:
+  enabled: true
+  fuse_root: /mnt/user
+  mount_priority: disk_first
+  split_share_preflight: fail
+  split_share_unmapped_docker_path: warn
+  split_share_max_entries: 20000
+  split_share_follow_symlinks: false
+```
+
+- `mount_priority`
+  - `disk_first` (default): prefers `/mnt/diskN` if both disk and cache have the same path.
+  - `cache_first`: prefers `/mnt/cache*` first.
+- `split_share_preflight`
+  - `fail`: aborts before mkbrr when split-share mismatch is detected.
+  - `warn`: prints warning and continues.
+  - `off`: disables split-share preflight.
+- `split_share_unmapped_docker_path`
+  - Controls behavior when docker job/content paths are outside `container_data_root` and cannot be safely preflight-checked.
+  - Values: `off`, `warn` (default), `fail`.
+
 ## Usage
 
 Run the wizard:
