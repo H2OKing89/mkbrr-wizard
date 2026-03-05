@@ -7,6 +7,7 @@ argument-hint: 'Which menu or prompt sequence should change?'
 # Interactive Flow Change Safely
 
 ## Docs First
+
 - Validate prompt wording and defaults against local docs before changing flow:
 - `docs/cli-reference-create.md`
 - `docs/cli-reference-check-inspect.md`
@@ -14,11 +15,13 @@ argument-hint: 'Which menu or prompt sequence should change?'
 - `docs/presets.md`
 
 ## When To Use
+
 - Modify menu options or prompt order in `main()`.
 - Add or remove user prompts in create/check/inspect/batch flows.
 - Investigate regressions caused by prompt branching.
 
 ## Procedure
+
 1. Document current and desired interaction sequence as input/output steps.
 2. Update prompt/branch logic in `mkbrr-wizard.py` with minimal edits.
 3. Add or update flow tests (`tests/test_main_flow.py`, `tests/test_main_docker_flow.py`, `tests/test_main_edge_cases.py`, `tests/test_main_failures.py`, `tests/test_interactive.py`).
@@ -27,11 +30,13 @@ argument-hint: 'Which menu or prompt sequence should change?'
 6. Run `pytest` and review failures for branch-order assumptions.
 
 ## Completion Checks
+
 - New flow is fully covered by at least one integration-style test.
 - Default choices and quit paths are tested.
 - No unexpected behavior changes in unaffected menu branches.
 
 ## References
+
 - `mkbrr-wizard.py`
 - `tests/test_interactive.py`
 - `tests/test_main_flow.py`

@@ -7,6 +7,7 @@ argument-hint: 'What path(s), runtime, and observed mismatch are you debugging?'
 # Path Mapping And Unraid Debug
 
 ## Docs First
+
 - Check local docs that affect path and batch behavior:
 - `docs/installation.md`
 - `docs/cli-reference-create.md`
@@ -15,11 +16,13 @@ argument-hint: 'What path(s), runtime, and observed mismatch are you debugging?'
 - Refresh local copies with `bash scripts/update-mkbrr-docs.sh` if needed.
 
 ## When To Use
+
 - A host path is mapped to the wrong container path.
 - `split_share_preflight` fails or warns unexpectedly.
 - Docker jobs include unmapped paths outside configured roots.
 
 ## Procedure
+
 1. Capture runtime (`docker` or `native`) and relevant config (`paths`, `unraid`, and `batch`).
 2. Trace conversion through `map_content_path()` and `map_torrent_path()` in `mkbrr-wizard.py`.
 3. For Unraid issues, trace helper logic that resolves `/mnt/user/*` to physical mounts and review `mount_priority` behavior.
@@ -28,11 +31,13 @@ argument-hint: 'What path(s), runtime, and observed mismatch are you debugging?'
 6. Re-run `pytest` and verify edge-case tests still pass.
 
 ## Completion Checks
+
 - Path conversion is deterministic for both directions (host -> container and container -> host).
 - Split-share behavior matches configured policy (`fail`, `warn`, `off`).
 - Tests cover at least one normal case and one mismatch edge case.
 
 ## References
+
 - `mkbrr-wizard.py`
 - `tests/test_path_conversion.py`
 - `tests/test_unraid.py`
