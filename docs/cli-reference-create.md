@@ -15,6 +15,7 @@ mkbrr create /path/to/content [flags]
 ```
 
 > Create torrents in two modes:
+>
 > - Single file/directory mode (default)
 > - [Batch mode](batch-mode.md) using a YAML config file
 >
@@ -28,7 +29,7 @@ mkbrr create /path/to/content [flags]
 ## Arguments
 
 | Argument | Description |
-|---|---|
+| --- | --- |
 | `/path/to/content` | (Required unless using `-b`) Path to the source file or directory |
 
 ---
@@ -38,7 +39,7 @@ mkbrr create /path/to/content [flags]
 ### Input & Output
 
 | Flag | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `--tracker, -t` | string | Tracker URL. Required unless using a preset with trackers defined. |
 | `--output, -o` | string | Optional. Set output path (default: `<n>.torrent` or `<tracker-prefix>_<n>.torrent`). |
 | `--skip-prefix` | bool | Don't add tracker domain prefix to output filename. |
@@ -46,7 +47,7 @@ mkbrr create /path/to/content [flags]
 ### Advanced Input (Batch & Presets)
 
 | Flag | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `--batch, -b` | string | Batch config file (YAML). Cannot be used with a path argument. See [Batch Mode](batch-mode.md). |
 | `--preset, -P` | string | Use preset from config. See [Presets](presets.md). |
 | `--preset-file` | string | Preset config file (default `~/.config/mkbrr/presets.yaml`). |
@@ -54,14 +55,14 @@ mkbrr create /path/to/content [flags]
 ### Content Selection
 
 | Flag | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `--exclude` | array | Exclude files matching these patterns (e.g., `"*.nfo,*.jpg"` or `--exclude "*.nfo" --exclude "*.jpg"`). Patterns are additive with preset patterns. |
 | `--include` | array | Include only files matching these patterns. Activates whitelist mode. Patterns are additive with preset patterns. |
 
 ### Torrent Internals
 
 | Flag | Type | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `--private, -p` | bool | `true` | Make torrent private. Enabled by default for tracker compliance. |
 | `--piece-length, -l` | number | auto | Set piece length to 2^n bytes (16–27). Automatic if not specified. |
 | `--max-piece-length, -m` | number | — | Limit maximum automatically calculated piece length to 2^n bytes (16–27). |
@@ -70,7 +71,7 @@ mkbrr create /path/to/content [flags]
 ### Seeding & Metadata
 
 | Flag | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `--web-seed, -w` | array | Specify web seed URLs. Can be used multiple times. |
 | `--source, -s` | string | Specify the source string. Some trackers require specific source tags. |
 | `--comment, -c` | string | Specify a comment. |
@@ -80,7 +81,7 @@ mkbrr create /path/to/content [flags]
 ### Execution & Output Control
 
 | Flag | Type | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `--workers` | number | auto | Number of concurrent goroutines used for hashing. |
 | `--verbose, -v` | bool | `false` | Be verbose. |
 | `--quiet` | bool | `false` | Print only the final torrent file path upon success. Useful for scripts. |

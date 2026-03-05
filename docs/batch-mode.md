@@ -50,7 +50,7 @@ jobs:
 ### Required Fields
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `version` | Must be `1` |
 | `jobs` | List of torrent creation tasks |
 | `output` | Path for the output `.torrent` file |
@@ -59,7 +59,7 @@ jobs:
 ### Optional Per-Job Settings
 
 | Field | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `trackers` | string[] | Announce URLs list |
 | `webseeds` | string[] | Web seed URLs list |
 | `private` | boolean | Set to `true` or `false` |

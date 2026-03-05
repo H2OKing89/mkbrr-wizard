@@ -19,14 +19,14 @@ mkbrr check <torrent-file> <content-path> [flags]
 ### Arguments
 
 | Argument | Description |
-|---|---|
+| --- | --- |
 | `<torrent-file>` | (Required) Path to the `.torrent` file |
 | `<content-path>` | (Required) Path to the directory or file containing the data to check |
 
 ### Flags
 
 | Flag | Type | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `--verbose, -v` | bool | `false` | Be verbose. Shows detailed info including bad piece indices. |
 | `--quiet` | bool | `false` | Print only the final torrent file path upon success. Useful for scripts. |
 | `--workers` | number | auto | Number of concurrent goroutines used for hashing. |
@@ -66,13 +66,13 @@ mkbrr inspect <torrent-file> [flags]
 ### Arguments
 
 | Argument | Description |
-|---|---|
+| --- | --- |
 | `<torrent-file>` | (Required) Path to the `.torrent` file to inspect |
 
 ### Flags
 
 | Flag | Type | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `--verbose, -v` | bool | `false` | Show all metadata fields, including non-standard ones. |
 
 ---
