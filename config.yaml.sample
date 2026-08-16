@@ -8,6 +8,9 @@ runtime: auto
 docker_support: true
 chown: true
 
+# Optional: run mkbrr inside Docker as a specific user, for example "99:100".
+# docker_user: "99:100"
+
 unraid:
   # Enable to resolve /mnt/user/* paths to physical /mnt/diskN/* or /mnt/cache* mounts.
   enabled: false
@@ -32,10 +35,6 @@ unraid:
   # Upper bound for files scanned during split-share detection (to avoid huge tree scans)
   split_share_max_entries: 20000
   split_share_follow_symlinks: false
-
-theapp:
-  # optional - run mkbrr inside docker as a specific user: "99:100"
-  # docker_user: "99:100"
 
 mkbrr:
   binary: mkbrr

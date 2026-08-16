@@ -6,7 +6,7 @@ Rich UI edition ✨
 
 Key points:
 - runtime: auto|docker|native
-- docker_support: true/false (also tolerates "ture")
+- docker_support: true/false
 - chown: true/false
 - Accepts either /mnt/... or /data/... paths (maps depending on runtime)
 - Always passes --preset-file
@@ -28,10 +28,18 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
+
+try:
+    from pydantic import BaseModel, ConfigDict, Field, ValidationError
+except ImportError as e:
+    print("❌ pydantic is not installed. Install it with:\n   pip install 'pydantic>=2.7,<3'")
+    raise SystemExit(1) from e
 
 try:
     import yaml
@@ -123,11 +131,188 @@ def _coerce_bool(v: Any, default: bool) -> bool:
         return bool(v)
     if isinstance(v, str):
         s = v.strip().lower()
-        if s in ("true", "ture", "yes", "y", "1", "on", "enabled"):
+        if s in ("true", "yes", "y", "1", "on", "enabled"):
             return True
         if s in ("false", "no", "n", "0", "off", "disabled"):
             return False
     return default
+
+
+class _StrictConfigModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+
+class _MkbrrInput(_StrictConfigModel):
+    binary: str = "mkbrr"
+    image: str = DEFAULT_MKBRR_IMAGE
+
+
+class _PathsInput(_StrictConfigModel):
+    host_data_root: str = "/mnt/user/data"
+    container_data_root: str = "/data"
+    host_output_dir: str = "/mnt/user/data/downloads/torrents/torrentfiles"
+    container_output_dir: str = "/torrentfiles"
+    host_config_dir: str = "/mnt/cache/appdata/mkbrr"
+    container_config_dir: str = "/root/.config/mkbrr"
+
+
+class _OwnershipInput(_StrictConfigModel):
+    uid: int = 99
+    gid: int = 100
+
+
+class _BatchInput(_StrictConfigModel):
+    mode: str = "simple"
+    job_timeout_seconds: int | None = None
+
+
+class _UnraidInput(_StrictConfigModel):
+    enabled: bool = False
+    fuse_root: str = "/mnt/user"
+    mount_priority: str = "disk_first"
+    split_share_preflight: str = "fail"
+    split_share_unmapped_docker_path: str = "warn"
+    split_share_max_entries: int = 20000
+    split_share_follow_symlinks: bool = False
+
+
+class _WorkersInput(_StrictConfigModel):
+    hdd: int | str | None = 1
+    ssd: int | str | None = "auto"
+    default: int | str | None = "auto"
+
+
+class _PushoverInput(_StrictConfigModel):
+    enabled: bool = False
+    app_token: str = ""
+    user_key: str = ""
+    priority: int = 0
+    failure_priority: int = 1
+    device: str = ""
+
+
+class _DiscordInput(_StrictConfigModel):
+    enabled: bool = False
+    webhook_url: str = ""
+    username: str = "mkbrr-wizard"
+    avatar_url: str = ""
+    color_success: int | str = 0x2ECC71
+    color_failure: int | str = 0xE74C3C
+    color_partial: int | str = 0xF39C12
+
+
+class _NotificationsInput(_StrictConfigModel):
+    enabled: bool = False
+    policy: str = "summary"
+    pushover: _PushoverInput = Field(default_factory=_PushoverInput)
+    discord: _DiscordInput = Field(default_factory=_DiscordInput)
+    timeout_seconds: int = 10
+
+
+class _AppConfigInput(_StrictConfigModel):
+    runtime: str = "auto"
+    docker_support: bool = True
+    chown: bool = True
+    docker_user: str | None = None
+    mkbrr: _MkbrrInput = Field(default_factory=_MkbrrInput)
+    paths: _PathsInput = Field(default_factory=_PathsInput)
+    ownership: _OwnershipInput = Field(default_factory=_OwnershipInput)
+    batch: _BatchInput = Field(default_factory=_BatchInput)
+    unraid: _UnraidInput = Field(default_factory=_UnraidInput)
+    notifications: _NotificationsInput = Field(default_factory=_NotificationsInput)
+    workers: _WorkersInput = Field(default_factory=_WorkersInput)
+    presets_yaml: str = "presets.yaml"
+
+
+_LEGACY_TURE_PATHS = (
+    ("docker_support",),
+    ("chown",),
+    ("unraid", "enabled"),
+    ("unraid", "split_share_follow_symlinks"),
+    ("notifications", "enabled"),
+    ("notifications", "pushover", "enabled"),
+    ("notifications", "discord", "enabled"),
+)
+
+_LEGACY_BOOL_PATHS = (
+    (("docker_support",), True),
+    (("chown",), True),
+    (("unraid", "enabled"), False),
+    (("unraid", "split_share_follow_symlinks"), False),
+    (("notifications", "enabled"), False),
+    (("notifications", "pushover", "enabled"), False),
+    (("notifications", "discord", "enabled"), False),
+)
+
+_LEGACY_INT_PATHS = (
+    ("ownership", "uid"),
+    ("ownership", "gid"),
+    ("batch", "job_timeout_seconds"),
+    ("unraid", "split_share_max_entries"),
+    ("notifications", "timeout_seconds"),
+    ("notifications", "pushover", "priority"),
+    ("notifications", "pushover", "failure_priority"),
+)
+
+
+def _migrate_legacy_ture(raw: dict[str, Any]) -> None:
+    migrated_paths: list[str] = []
+    for path_parts in _LEGACY_TURE_PATHS:
+        node: dict[str, Any] = raw
+        for key in path_parts[:-1]:
+            child = node.get(key)
+            if not isinstance(child, dict):
+                break
+            node = child
+        else:
+            field_name = path_parts[-1]
+            value = node.get(field_name)
+            if isinstance(value, str) and value.strip().lower() == "ture":
+                node[field_name] = True
+                migrated_paths.append(".".join(path_parts))
+
+    if migrated_paths:
+        warnings.warn(
+            "Migrated legacy 'ture' boolean value(s) at "
+            f"{', '.join(migrated_paths)}; update config.yaml to use true.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+
+def _resolve_config_path(
+    raw: dict[str, Any], path_parts: tuple[str, ...]
+) -> tuple[dict[str, Any], str] | None:
+    node = raw
+    for key in path_parts[:-1]:
+        child = node.get(key)
+        if not isinstance(child, dict):
+            return None
+        node = child
+    return node, path_parts[-1]
+
+
+def _normalize_legacy_config_scalars(raw: dict[str, Any]) -> None:
+    for path_parts, default in _LEGACY_BOOL_PATHS:
+        resolved = _resolve_config_path(raw, path_parts)
+        if resolved is None:
+            continue
+        node, field_name = resolved
+        if field_name in node:
+            node[field_name] = _coerce_bool(node[field_name], default)
+
+    for path_parts in _LEGACY_INT_PATHS:
+        resolved = _resolve_config_path(raw, path_parts)
+        if resolved is None:
+            continue
+        node, field_name = resolved
+        value = node.get(field_name)
+        if value is None:
+            continue
+        try:
+            node[field_name] = int(value)
+        except (TypeError, ValueError):
+            pass
 
 
 def _expand_env(s: str) -> str:
@@ -259,6 +444,105 @@ class AppCfg:
     workers: WorkersCfg = field(default_factory=WorkersCfg)
 
 
+@dataclass(frozen=True)
+class BatchJob:
+    path: str
+    output: str
+    trackers: tuple[str, ...] = ()
+    webseeds: tuple[str, ...] = ()
+    private: bool | None = None
+    no_date: bool | None = None
+    entropy: bool | None = None
+    skip_prefix: bool | None = None
+    fail_on_season_warning: bool | None = None
+    piece_length: int | None = None
+    comment: str = ""
+    source: str = ""
+    exclude_patterns: tuple[str, ...] = ()
+    include_patterns: tuple[str, ...] = ()
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> BatchJob:
+        def required_text(field_name: str) -> str:
+            value = raw.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                label = "content path" if field_name == "path" else field_name
+                raise ValueError(f"Batch job {label} cannot be empty")
+            return value.strip()
+
+        def optional_text(field_name: str) -> str:
+            value = raw.get(field_name)
+            if value is None:
+                return ""
+            if not isinstance(value, str):
+                raise ValueError(f"Batch job {field_name} must be a string")
+            return value.strip()
+
+        def optional_bool(field_name: str) -> bool | None:
+            value = raw.get(field_name)
+            if value is None:
+                return None
+            if not isinstance(value, bool):
+                raise ValueError(f"Batch job {field_name} must be a boolean")
+            return value
+
+        def string_tuple(field_name: str) -> tuple[str, ...]:
+            value = raw.get(field_name)
+            if value is None:
+                return ()
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ValueError(f"Batch job {field_name} must be a list of strings")
+            return tuple(item.strip() for item in value if item.strip())
+
+        piece_length = raw.get("piece_length")
+        if piece_length is not None:
+            if isinstance(piece_length, bool) or not isinstance(piece_length, int):
+                raise ValueError("Batch job piece_length must be an integer")
+            if not 16 <= piece_length <= 27:
+                raise ValueError("Batch job piece_length must be between 16 and 27")
+
+        return cls(
+            path=required_text("path"),
+            output=required_text("output"),
+            trackers=string_tuple("trackers"),
+            webseeds=string_tuple("webseeds"),
+            private=optional_bool("private"),
+            no_date=optional_bool("no_date"),
+            entropy=optional_bool("entropy"),
+            skip_prefix=optional_bool("skip_prefix"),
+            fail_on_season_warning=optional_bool("fail_on_season_warning"),
+            piece_length=piece_length,
+            comment=optional_text("comment"),
+            source=optional_text("source"),
+            exclude_patterns=string_tuple("exclude_patterns"),
+            include_patterns=string_tuple("include_patterns"),
+        )
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    argv: tuple[str, ...]
+    cwd: str | None = None
+
+    def with_args(self, *args: str) -> CommandSpec:
+        return CommandSpec(argv=(*self.argv, *args), cwd=self.cwd)
+
+
+@dataclass(frozen=True)
+class JobResult:
+    index: int
+    content_path: str
+    output_path: str
+    exit_code: int
+
+    @property
+    def succeeded(self) -> bool:
+        return self.exit_code == 0
+
+    def as_tuple(self) -> tuple[int, str, str, int]:
+        return self.index, self.content_path, self.output_path, self.exit_code
+
+
 def load_config(path: Path) -> AppCfg:
     raw: dict[str, Any] = {}
     if path.exists():
@@ -271,6 +555,14 @@ def load_config(path: Path) -> AppCfg:
             raw = cast(dict[str, Any], loaded)
     else:
         raise FileNotFoundError(f"Config not found: {path}")
+
+    _migrate_legacy_ture(raw)
+    _normalize_legacy_config_scalars(raw)
+    try:
+        raw = cast(dict[str, Any], _AppConfigInput.model_validate(raw).model_dump())
+    except ValidationError as e:
+        errors = e.errors(include_url=False, include_input=False)
+        raise ValueError(f"Invalid configuration:\n{json.dumps(errors, indent=2)}") from e
 
     runtime = str(raw.get("runtime", "auto")).strip().lower()
     if runtime not in ("auto", "docker", "native"):
@@ -1365,8 +1657,8 @@ def build_create_command(
     content_path: str,
     preset: str,
     host_data_root_override: str | None = None,
-) -> tuple[list[str], str | None]:
-    """Return (cmd, cwd) for create action depending on runtime."""
+) -> CommandSpec:
+    """Return the create command plan for the selected runtime."""
     if runtime == "docker":
         cmd = docker_run_base(
             cfg,
@@ -1392,7 +1684,7 @@ def build_create_command(
             cfg.presets_yaml_host,
         ]
         cwd = cfg.paths.host_output_dir
-    return cmd, cwd
+    return CommandSpec(argv=tuple(cmd), cwd=cwd)
 
 
 def _append_bool_flag(cmd: list[str], flag: str, *, value: bool) -> None:
@@ -1404,99 +1696,76 @@ def build_batch_job_create_command(
     cfg: AppCfg,
     runtime: str,
     preset: str,
-    job: dict[str, Any],
+    job: BatchJob | Mapping[str, Any],
     host_data_root_override: str | None = None,
-) -> tuple[list[str], str | None]:
-    """Return (cmd, cwd) for a single batch job executed via mkbrr create."""
-    content_path = str(job.get("path", "")).strip()
-    output_path = str(job.get("output", "")).strip()
-    if not content_path:
-        raise ValueError("Batch job content path cannot be empty")
-    if not output_path:
-        raise ValueError("Batch job output path cannot be empty")
+) -> CommandSpec:
+    """Return the command plan for a single batch job executed via mkbrr create."""
+    job = job if isinstance(job, BatchJob) else BatchJob.from_mapping(job)
 
-    cmd, cwd = build_create_command(
+    base_spec = build_create_command(
         cfg,
         runtime,
-        content_path,
+        job.path,
         preset,
         host_data_root_override=host_data_root_override,
     )
-    cmd += ["--output", output_path]
+    cmd = list(base_spec.argv)
+    cmd += ["--output", job.output]
 
-    trackers = job.get("trackers")
-    if isinstance(trackers, list):
-        for tracker in trackers:
-            tracker_text = str(tracker).strip()
-            if tracker_text:
-                cmd += ["--tracker", tracker_text]
+    for tracker in job.trackers:
+        cmd += ["--tracker", tracker]
 
-    webseeds = job.get("webseeds")
-    if isinstance(webseeds, list):
-        for seed in webseeds:
-            seed_text = str(seed).strip()
-            if seed_text:
-                cmd += ["--web-seed", seed_text]
+    for seed in job.webseeds:
+        cmd += ["--web-seed", seed]
 
-    if isinstance(job.get("private"), bool):
-        cmd.append(f"--private={str(job['private']).lower()}")
+    if job.private is not None:
+        cmd.append(f"--private={str(job.private).lower()}")
 
-    if isinstance(job.get("no_date"), bool):
-        _append_bool_flag(cmd, "--no-date", value=job["no_date"])
+    if job.no_date is not None:
+        _append_bool_flag(cmd, "--no-date", value=job.no_date)
 
-    if isinstance(job.get("entropy"), bool):
-        _append_bool_flag(cmd, "--entropy", value=job["entropy"])
+    if job.entropy is not None:
+        _append_bool_flag(cmd, "--entropy", value=job.entropy)
 
-    if isinstance(job.get("skip_prefix"), bool):
-        _append_bool_flag(cmd, "--skip-prefix", value=job["skip_prefix"])
+    if job.skip_prefix is not None:
+        _append_bool_flag(cmd, "--skip-prefix", value=job.skip_prefix)
 
-    if isinstance(job.get("fail_on_season_warning"), bool):
+    if job.fail_on_season_warning is not None:
         _append_bool_flag(
             cmd,
             "--fail-on-season-warning",
-            value=job["fail_on_season_warning"],
+            value=job.fail_on_season_warning,
         )
 
-    piece_length = job.get("piece_length")
-    if isinstance(piece_length, int):
-        cmd += ["--piece-length", str(piece_length)]
+    if job.piece_length is not None:
+        cmd += ["--piece-length", str(job.piece_length)]
 
-    comment = str(job.get("comment", "")).strip()
-    if comment:
-        cmd += ["--comment", comment]
+    if job.comment:
+        cmd += ["--comment", job.comment]
 
-    source = str(job.get("source", "")).strip()
-    if source:
-        cmd += ["--source", source]
+    if job.source:
+        cmd += ["--source", job.source]
 
-    exclude_patterns = job.get("exclude_patterns")
-    if isinstance(exclude_patterns, list):
-        for pattern in exclude_patterns:
-            pattern_text = str(pattern).strip()
-            if pattern_text:
-                cmd += ["--exclude", pattern_text]
+    for pattern in job.exclude_patterns:
+        cmd += ["--exclude", pattern]
 
-    include_patterns = job.get("include_patterns")
-    if isinstance(include_patterns, list):
-        for pattern in include_patterns:
-            pattern_text = str(pattern).strip()
-            if pattern_text:
-                cmd += ["--include", pattern_text]
+    for pattern in job.include_patterns:
+        cmd += ["--include", pattern]
 
-    return cmd, cwd
+    return CommandSpec(argv=tuple(cmd), cwd=base_spec.cwd)
 
 
 def build_inspect_command(
     cfg: AppCfg, runtime: str, torrent_path: str, verbose: bool = False
-) -> list[str]:
-    """Return cmd for inspect action depending on runtime."""
+) -> CommandSpec:
+    """Return the inspect command plan for the selected runtime."""
     if runtime == "docker":
         cmd = docker_run_base(cfg, cfg.paths.container_config_dir) + ["inspect", torrent_path]
     else:
         cmd = [cfg.mkbrr.binary, "inspect", torrent_path]
     if verbose:
         cmd.append("-v")
-    return cmd
+    return CommandSpec(argv=tuple(cmd))
 
 
 def build_check_command(
@@ -1507,8 +1776,8 @@ def build_check_command(
     verbose: bool = False,
     quiet: bool = False,
     workers: int | None = None,
-) -> list[str]:
-    """Return cmd for check action depending on runtime."""
+) -> CommandSpec:
+    """Return the check command plan for the selected runtime."""
     if runtime == "docker":
         cmd = docker_run_base(cfg, cfg.paths.container_config_dir) + [
             "check",
@@ -1524,7 +1793,7 @@ def build_check_command(
         cmd.append("--quiet")
     if workers:
         cmd += ["--workers", str(workers)]
-    return cmd
+    return CommandSpec(argv=tuple(cmd))
 
 
 def docker_run_base(
@@ -1754,7 +2023,7 @@ def ask_workers() -> int | None:
         return None
 
 
-def confirm_cmd(cmd: list[str], cwd: str | None = None) -> bool:
+def confirm_cmd(cmd: Sequence[str], cwd: str | None = None) -> bool:
     cmd_str = " ".join(shlex.quote(x) for x in cmd)
 
     parts: list[Text | Syntax] = []
@@ -2599,7 +2868,7 @@ def main() -> None:
                         render_split_summary(folder_name, parts, all_patterns, output_dir)
 
                         # --- Build batch jobs and preview first command ---
-                        split_jobs: list[dict[str, Any]] = []
+                        split_jobs: list[BatchJob] = []
                         for idx, (_part_eps, pats) in enumerate(
                             zip(parts, all_patterns, strict=True), 1
                         ):
@@ -2611,16 +2880,16 @@ def main() -> None:
                                 if content_fallback != host_out_path:
                                     out_path = content_fallback
                             split_jobs.append(
-                                {
-                                    "path": content_path,
-                                    "output": out_path,
-                                    "include_patterns": pats,
-                                    "fail_on_season_warning": False,
-                                }
+                                BatchJob(
+                                    path=content_path,
+                                    output=out_path,
+                                    include_patterns=tuple(pats),
+                                    fail_on_season_warning=False,
+                                )
                             )
 
                         try:
-                            preview_cmd, preview_cwd = build_batch_job_create_command(
+                            preview_spec = build_batch_job_create_command(
                                 cfg,
                                 runtime,
                                 preset,
@@ -2635,18 +2904,18 @@ def main() -> None:
                             f"[info]About to run {len(split_jobs)} split-series job(s). "
                             f"Showing Part 1 command preview.[/]"
                         )
-                        if not confirm_cmd(preview_cmd, cwd=preview_cwd):
+                        if not confirm_cmd(preview_spec.argv, cwd=preview_spec.cwd):
                             continue
 
                         # --- Execute each part ---
                         succeeded = 0
                         failed = 0
-                        result_rows: list[tuple[int, str, str, int]] = []
+                        results: list[JobResult] = []
                         split_t0 = time.monotonic()
 
                         for idx, job in enumerate(split_jobs, 1):
                             try:
-                                cmd, cwd = build_batch_job_create_command(
+                                command_spec = build_batch_job_create_command(
                                     cfg,
                                     runtime,
                                     preset,
@@ -2655,7 +2924,7 @@ def main() -> None:
                                 )
                             except ValueError as e:
                                 failed += 1
-                                result_rows.append((idx, str(job["path"]), str(job["output"]), 2))
+                                results.append(JobResult(idx, job.path, job.output, 2))
                                 console.print(f"[err]❌ Part {idx} invalid: {e}[/]")
                                 continue
 
@@ -2670,18 +2939,16 @@ def main() -> None:
                             )
                             job_workers = resolve_workers(job_storage, cfg.workers)
                             if job_workers is not None:
-                                cmd += ["--workers", str(job_workers)]
+                                command_spec = command_spec.with_args("--workers", str(job_workers))
 
                             try:
                                 r = subprocess.run(
-                                    cmd,
-                                    cwd=cwd,
+                                    command_spec.argv,
+                                    cwd=command_spec.cwd,
                                     check=False,
                                     timeout=cfg.batch.job_timeout_seconds,
                                 )
-                                result_rows.append(
-                                    (idx, str(job["path"]), str(job["output"]), r.returncode)
-                                )
+                                results.append(JobResult(idx, job.path, job.output, r.returncode))
                                 if r.returncode == 0:
                                     succeeded += 1
                                 else:
@@ -2692,7 +2959,7 @@ def main() -> None:
                                     )
                             except subprocess.TimeoutExpired:
                                 failed += 1
-                                result_rows.append((idx, str(job["path"]), str(job["output"]), 124))
+                                results.append(JobResult(idx, job.path, job.output, 124))
                                 console.print(f"[err]❌ Part {idx} timed out[/]")
 
                         # --- Results table ---
@@ -2707,9 +2974,14 @@ def main() -> None:
                         results_table.add_column("Output", style="path")
                         results_table.add_column("Code", justify="right")
 
-                        for idx, cp, op, code in result_rows:
-                            code_style = "ok" if code == 0 else "err"
-                            results_table.add_row(str(idx), cp, op, f"[{code_style}]{code}[/]")
+                        for result in results:
+                            code_style = "ok" if result.succeeded else "err"
+                            results_table.add_row(
+                                str(result.index),
+                                result.content_path,
+                                result.output_path,
+                                f"[{code_style}]{result.exit_code}[/]",
+                            )
                         console.print(results_table)
 
                         if succeeded > 0:
@@ -2718,9 +2990,9 @@ def main() -> None:
                                 f" successful part(s).[/]"
                             )
                             successful_outputs = [
-                                _host_torrent_output_path(cfg, output_path)
-                                for _, _, output_path, code in result_rows
-                                if code == 0
+                                _host_torrent_output_path(cfg, result.output_path)
+                                for result in results
+                                if result.succeeded
                             ]
                             maybe_fix_torrent_permissions(cfg, successful_outputs)
                         else:
@@ -2743,7 +3015,7 @@ def main() -> None:
                                 details={
                                     "succeeded": succeeded,
                                     "failed": failed,
-                                    "result_rows": result_rows,
+                                    "result_rows": [result.as_tuple() for result in results],
                                     "elapsed": split_elapsed,
                                 },
                             )
@@ -2751,7 +3023,7 @@ def main() -> None:
                         _did_split = True
 
                 if not _did_split:
-                    cmd, cwd = build_create_command(
+                    command_spec = build_create_command(
                         cfg,
                         runtime,
                         content_path,
@@ -2770,7 +3042,7 @@ def main() -> None:
                     )
                     workers = resolve_workers(storage_type, cfg.workers)
                     if workers is not None:
-                        cmd += ["--workers", str(workers)]
+                        command_spec = command_spec.with_args("--workers", str(workers))
                         console.print(
                             f"[info]ℹ Storage detected as {storage_type.upper()} "
                             f"→ --workers {workers}[/]"
@@ -2781,14 +3053,18 @@ def main() -> None:
                             f"→ workers auto[/]"
                         )
 
-                    if confirm_cmd(cmd, cwd=cwd):
+                    if confirm_cmd(command_spec.argv, cwd=command_spec.cwd):
                         outputs_before = (
                             _snapshot_torrent_outputs(cfg.paths.host_output_dir)
                             if cfg.chown
                             else {}
                         )
                         t0 = time.monotonic()
-                        r = subprocess.run(cmd, cwd=cwd, check=False)
+                        r = subprocess.run(
+                            command_spec.argv,
+                            cwd=command_spec.cwd,
+                            check=False,
+                        )
                         elapsed = time.monotonic() - t0
                         if r.returncode == 0:
                             console.print("[ok]✅ mkbrr create finished.[/]")
@@ -2844,9 +3120,15 @@ def main() -> None:
                     console.print("[err]❌ No valid jobs found after validation.[/]")
                     continue
 
-                typed_jobs: list[dict[str, Any]] = [
-                    cast(dict[str, Any], job) for job in jobs if isinstance(job, dict)
-                ]
+                try:
+                    typed_jobs: list[BatchJob] = []
+                    for index, job in enumerate(jobs, 1):
+                        if not isinstance(job, Mapping):
+                            raise ValueError(f"Batch job {index} must be a mapping")
+                        typed_jobs.append(BatchJob.from_mapping(job))
+                except ValueError as e:
+                    console.print(f"[err]❌ Invalid batch job: {e}[/]")
+                    continue
                 if not typed_jobs:
                     console.print("[err]❌ No valid job objects found after validation.[/]")
                     continue
@@ -2857,9 +3139,9 @@ def main() -> None:
                     preview_override = None
                     if runtime == "docker":
                         preview_override = resolve_unraid_content_path(
-                            cfg, runtime, str(typed_jobs[0].get("path", ""))
+                            cfg, runtime, typed_jobs[0].path
                         )[1]
-                    preview_cmd, preview_cwd = build_batch_job_create_command(
+                    preview_spec = build_batch_job_create_command(
                         cfg,
                         runtime,
                         preset,
@@ -2872,17 +3154,17 @@ def main() -> None:
                 console.print(
                     f"[info]About to run {len(typed_jobs)} batch job(s). Showing first job command preview.[/]"
                 )
-                if not confirm_cmd(preview_cmd, cwd=preview_cwd):
+                if not confirm_cmd(preview_spec.argv, cwd=preview_spec.cwd):
                     continue
 
                 succeeded = 0
                 failed = 0
-                batch_result_rows: list[tuple[int, str, str, int]] = []
+                batch_results: list[JobResult] = []
                 batch_t0 = time.monotonic()
 
                 for idx, job in enumerate(typed_jobs, 1):
-                    output_path = str(job.get("output", "")).strip()
-                    content_path = str(job.get("path", "")).strip()
+                    output_path = job.output
+                    content_path = job.path
                     job_override = None
                     if runtime == "docker":
                         job_override = resolve_unraid_content_path(cfg, runtime, content_path)[1]
@@ -2897,12 +3179,12 @@ def main() -> None:
                         )
                     except ValueError as e:
                         failed += 1
-                        batch_result_rows.append((idx, content_path, output_path, 2))
+                        batch_results.append(JobResult(idx, content_path, output_path, 2))
                         console.print(f"[err]❌ Job {idx} preflight failed: {e}[/]")
                         continue
 
                     try:
-                        cmd, cwd = build_batch_job_create_command(
+                        command_spec = build_batch_job_create_command(
                             cfg,
                             runtime,
                             preset,
@@ -2911,7 +3193,7 @@ def main() -> None:
                         )
                     except ValueError as e:
                         failed += 1
-                        batch_result_rows.append((idx, content_path, output_path, 2))
+                        batch_results.append(JobResult(idx, content_path, output_path, 2))
                         console.print(f"[err]❌ Job {idx} invalid: {e}[/]")
                         continue
 
@@ -2926,16 +3208,18 @@ def main() -> None:
                     )
                     job_workers = resolve_workers(job_storage, cfg.workers)
                     if job_workers is not None:
-                        cmd += ["--workers", str(job_workers)]
+                        command_spec = command_spec.with_args("--workers", str(job_workers))
 
                     try:
                         r = subprocess.run(
-                            cmd,
-                            cwd=cwd,
+                            command_spec.argv,
+                            cwd=command_spec.cwd,
                             check=False,
                             timeout=cfg.batch.job_timeout_seconds,
                         )
-                        batch_result_rows.append((idx, content_path, output_path, r.returncode))
+                        batch_results.append(
+                            JobResult(idx, content_path, output_path, r.returncode)
+                        )
 
                         if r.returncode == 0:
                             succeeded += 1
@@ -2946,7 +3230,7 @@ def main() -> None:
                             )
                     except subprocess.TimeoutExpired:
                         failed += 1
-                        batch_result_rows.append((idx, content_path, output_path, 124))
+                        batch_results.append(JobResult(idx, content_path, output_path, 124))
                         timeout_msg = (
                             f" after {cfg.batch.job_timeout_seconds}s"
                             if cfg.batch.job_timeout_seconds is not None
@@ -2964,13 +3248,13 @@ def main() -> None:
                 results_table.add_column("Output", style="path")
                 results_table.add_column("Code", justify="right")
 
-                for idx, content_path, output_path, code in batch_result_rows:
-                    code_style = "ok" if code == 0 else "err"
+                for result in batch_results:
+                    code_style = "ok" if result.succeeded else "err"
                     results_table.add_row(
-                        str(idx),
-                        content_path,
-                        output_path,
-                        f"[{code_style}]{code}[/]",
+                        str(result.index),
+                        result.content_path,
+                        result.output_path,
+                        f"[{code_style}]{result.exit_code}[/]",
                     )
 
                 console.print(results_table)
@@ -2980,9 +3264,9 @@ def main() -> None:
                         f"[ok]✅ mkbrr batch create completed with {succeeded} successful job(s).[/]"
                     )
                     successful_outputs = [
-                        _host_torrent_output_path(cfg, output_path)
-                        for _, _, output_path, code in batch_result_rows
-                        if code == 0
+                        _host_torrent_output_path(cfg, result.output_path)
+                        for result in batch_results
+                        if result.succeeded
                     ]
                     maybe_fix_torrent_permissions(cfg, successful_outputs)
                 else:
@@ -3001,7 +3285,7 @@ def main() -> None:
                         details={
                             "succeeded": succeeded,
                             "failed": failed,
-                            "result_rows": batch_result_rows,
+                            "result_rows": [result.as_tuple() for result in batch_results],
                             "elapsed": batch_elapsed,
                         },
                     )
@@ -3020,11 +3304,15 @@ def main() -> None:
                     console.print(f"[err]❌ {e}[/]")
                     continue
                 verbose = ask_verbose("inspect")
-                cmd = build_inspect_command(cfg, runtime, torrent_path, verbose=verbose)
+                command_spec = build_inspect_command(cfg, runtime, torrent_path, verbose=verbose)
 
-                if confirm_cmd(cmd):
+                if confirm_cmd(command_spec.argv, cwd=command_spec.cwd):
                     t0 = time.monotonic()
-                    r = subprocess.run(cmd, check=False)
+                    r = subprocess.run(
+                        command_spec.argv,
+                        cwd=command_spec.cwd,
+                        check=False,
+                    )
                     elapsed = time.monotonic() - t0
                     if r.returncode == 0:
                         console.print("[ok]✅ done.[/]")
@@ -3112,7 +3400,7 @@ def main() -> None:
                     console.print("[warn]⚠ Both verbose and quiet selected; preferring quiet.[/]")
                     verbose = False
 
-                cmd = build_check_command(
+                command_spec = build_check_command(
                     cfg,
                     runtime,
                     torrent_path,
@@ -3122,9 +3410,13 @@ def main() -> None:
                     workers=workers,
                 )
 
-                if confirm_cmd(cmd):
+                if confirm_cmd(command_spec.argv, cwd=command_spec.cwd):
                     t0 = time.monotonic()
-                    r = subprocess.run(cmd, check=False)
+                    r = subprocess.run(
+                        command_spec.argv,
+                        cwd=command_spec.cwd,
+                        check=False,
+                    )
                     elapsed = time.monotonic() - t0
                     if r.returncode == 0:
                         console.print("[ok]✅ data verified.[/]")

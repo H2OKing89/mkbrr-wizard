@@ -30,37 +30,48 @@ def sample_cfg(mkbrr_wizard: ModuleType) -> Any:
 
 def test_build_create_command_docker(mkbrr_wizard: ModuleType) -> None:
     cfg = sample_cfg(mkbrr_wizard)
-    cmd, cwd = mkbrr_wizard.build_create_command(cfg, "docker", "/data/file.mkv", "btn")
+    spec = mkbrr_wizard.build_create_command(cfg, "docker", "/data/file.mkv", "btn")
 
-    assert cmd[0] == "docker"
-    assert "create" in cmd
-    assert "-P" in cmd
-    assert cfg.presets_yaml_container in cmd
-    assert cwd is None
+    assert isinstance(spec, mkbrr_wizard.CommandSpec)
+    assert spec.argv[0] == "docker"
+    assert "create" in spec.argv
+    assert "-P" in spec.argv
+    assert cfg.presets_yaml_container in spec.argv
+    assert spec.cwd is None
 
 
 def test_build_create_command_native(mkbrr_wizard: ModuleType) -> None:
     cfg = sample_cfg(mkbrr_wizard)
-    cmd, cwd = mkbrr_wizard.build_create_command(cfg, "native", "/mnt/user/data/file.mkv", "btn")
+    spec = mkbrr_wizard.build_create_command(cfg, "native", "/mnt/user/data/file.mkv", "btn")
 
-    assert cmd[0] == cfg.mkbrr.binary
-    assert "create" in cmd
-    assert cfg.presets_yaml_host in cmd
-    assert cwd == cfg.paths.host_output_dir
+    assert spec.argv[0] == cfg.mkbrr.binary
+    assert "create" in spec.argv
+    assert cfg.presets_yaml_host in spec.argv
+    assert spec.cwd == cfg.paths.host_output_dir
+
+
+def test_command_spec_with_args_returns_new_value(mkbrr_wizard: ModuleType) -> None:
+    spec = mkbrr_wizard.CommandSpec(argv=("mkbrr", "create"), cwd="working-directory")
+
+    extended = spec.with_args("--workers", "4")
+
+    assert spec.argv == ("mkbrr", "create")
+    assert extended.argv == ("mkbrr", "create", "--workers", "4")
+    assert extended.cwd == spec.cwd
 
 
 def test_build_inspect_command_verbose(mkbrr_wizard: ModuleType) -> None:
     cfg = sample_cfg(mkbrr_wizard)
-    cmd = mkbrr_wizard.build_inspect_command(
+    spec = mkbrr_wizard.build_inspect_command(
         cfg, "native", "/torrentfiles/test.torrent", verbose=True
     )
-    assert "inspect" in cmd
-    assert "-v" in cmd
+    assert "inspect" in spec.argv
+    assert "-v" in spec.argv
 
 
 def test_build_check_command_flags(mkbrr_wizard: ModuleType) -> None:
     cfg = sample_cfg(mkbrr_wizard)
-    cmd = mkbrr_wizard.build_check_command(
+    spec = mkbrr_wizard.build_check_command(
         cfg,
         "native",
         "/torrentfiles/t.torrent",
@@ -69,10 +80,11 @@ def test_build_check_command_flags(mkbrr_wizard: ModuleType) -> None:
         quiet=True,
         workers=4,
     )
-    assert "check" in cmd
-    assert "-v" in cmd
-    assert "--quiet" in cmd
-    assert "--workers" in cmd and "4" in cmd
+    assert "check" in spec.argv
+    assert "-v" in spec.argv
+    assert "--quiet" in spec.argv
+    assert "--workers" in spec.argv
+    assert "4" in spec.argv
 
 
 def test_pick_runtime_forced_overrides(mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:

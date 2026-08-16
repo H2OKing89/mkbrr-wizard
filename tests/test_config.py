@@ -191,8 +191,7 @@ unraid:
         finally:
             os.unlink(temp_path)
 
-    def test_bool_coercion_handles_typo(self, mkbrr_wizard: ModuleType) -> None:
-        """Common typo 'ture' should be coerced to True."""
+    def test_legacy_ture_is_migrated_with_one_warning(self, mkbrr_wizard: ModuleType) -> None:
         yaml_content = """
 runtime: auto
 docker_support: ture
@@ -203,12 +202,98 @@ chown: ture
             temp_path = f.name
 
         try:
-            cfg = mkbrr_wizard.load_config(Path(temp_path))
+            with pytest.warns(UserWarning, match="legacy 'ture'") as warning_records:
+                cfg = mkbrr_wizard.load_config(Path(temp_path))
 
+            assert len(warning_records) == 1
             assert cfg.docker_support is True
             assert cfg.chown is True
         finally:
             os.unlink(temp_path)
+
+    @pytest.mark.parametrize(
+        "yaml_content",
+        [
+            pytest.param("runtime: native\nrunttime: native\n", id="top_level"),
+            pytest.param(
+                "runtime: native\npaths:\n  host_data_rooot: /data\n",
+                id="nested",
+            ),
+        ],
+    )
+    def test_unknown_config_fields_raise(self, mkbrr_wizard: ModuleType, yaml_content: str) -> None:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            temp_path = f.name
+
+        try:
+            with pytest.raises(ValueError, match="Invalid configuration"):
+                mkbrr_wizard.load_config(Path(temp_path))
+        finally:
+            os.unlink(temp_path)
+
+    def test_invalid_runtime_type_is_rejected(self, mkbrr_wizard: ModuleType) -> None:
+        yaml_content = "runtime: []\n"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            temp_path = f.name
+
+        try:
+            with pytest.raises(ValueError, match="Invalid configuration"):
+                mkbrr_wizard.load_config(Path(temp_path))
+        finally:
+            os.unlink(temp_path)
+
+    def test_validation_error_excludes_input_and_url(self, mkbrr_wizard: ModuleType) -> None:
+        yaml_content = "unexpected_option: secret-value\n"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            temp_path = f.name
+
+        try:
+            with pytest.raises(ValueError, match="Invalid configuration") as error:
+                mkbrr_wizard.load_config(Path(temp_path))
+
+            message = str(error.value)
+            assert "secret-value" not in message
+            assert "https://errors.pydantic.dev" not in message
+        finally:
+            os.unlink(temp_path)
+
+    def test_legacy_scalar_values_are_normalized_before_strict_validation(
+        self, mkbrr_wizard: ModuleType
+    ) -> None:
+        yaml_content = """
+runtime: native
+docker_support: "yes"
+chown: 0
+ownership:
+  uid: "1000"
+  gid: "1001"
+unraid:
+  enabled: 1
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            temp_path = f.name
+
+        try:
+            cfg = mkbrr_wizard.load_config(Path(temp_path))
+
+            assert cfg.docker_support is True
+            assert cfg.chown is False
+            assert cfg.ownership.uid == 1000
+            assert cfg.ownership.gid == 1001
+            assert cfg.unraid.enabled is True
+        finally:
+            os.unlink(temp_path)
+
+    def test_sample_config_is_valid(self, mkbrr_wizard: ModuleType) -> None:
+        sample_path = Path(__file__).parents[1] / "config.yaml.sample"
+
+        cfg = mkbrr_wizard.load_config(sample_path)
+
+        assert cfg.mkbrr.image == "ghcr.io/autobrr/mkbrr:v1.24.1"
 
     def test_invalid_runtime_raises(self, mkbrr_wizard: ModuleType) -> None:
         """Invalid runtime value should raise ValueError."""

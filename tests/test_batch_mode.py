@@ -263,13 +263,14 @@ def test_build_batch_job_create_command_native_and_docker(
         "include_patterns": ["*.mkv"],
     }
 
-    native_cmd, native_cwd = mkbrr_wizard.build_batch_job_create_command(
+    native_spec = mkbrr_wizard.build_batch_job_create_command(
         cfg,
         "native",
         "btn",
         native_job,
     )
-    assert native_cmd[:2] == ["mkbrr", "create"]
+    native_cmd = native_spec.argv
+    assert native_cmd[:2] == ("mkbrr", "create")
     assert "-b" not in native_cmd
     assert "-P" in native_cmd
     assert "--output" in native_cmd
@@ -277,13 +278,13 @@ def test_build_batch_job_create_command_native_and_docker(
     assert "--private=true" in native_cmd
     assert "--no-date" not in native_cmd
     assert "--entropy" in native_cmd
-    assert native_cwd == cfg.paths.host_output_dir
+    assert native_spec.cwd == cfg.paths.host_output_dir
 
     docker_content = tmp_path / "docker-content.mkv"
     docker_content.write_text("x")
     docker_out = tmp_path / "docker-out.torrent"
 
-    docker_cmd, docker_cwd = mkbrr_wizard.build_batch_job_create_command(
+    docker_spec = mkbrr_wizard.build_batch_job_create_command(
         cfg,
         "docker",
         "btn",
@@ -292,11 +293,96 @@ def test_build_batch_job_create_command_native_and_docker(
             "output": str(docker_out),
         },
     )
+    docker_cmd = docker_spec.argv
     assert docker_cmd[0] == "docker"
     assert "-b" not in docker_cmd
     assert "-P" in docker_cmd
     assert "--output" in docker_cmd
-    assert docker_cwd is None
+    assert docker_spec.cwd is None
+
+
+def test_batch_job_from_mapping_normalizes_typed_fields(mkbrr_wizard: ModuleType) -> None:
+    job = mkbrr_wizard.BatchJob.from_mapping(
+        {
+            "path": " /data/show ",
+            "output": " /torrentfiles/show.torrent ",
+            "trackers": [" https://tracker.example/announce ", ""],
+            "webseeds": ["https://seed.example/file"],
+            "private": False,
+            "piece_length": 20,
+            "include_patterns": [" *.mkv "],
+        }
+    )
+
+    assert job.path == "/data/show"
+    assert job.output == "/torrentfiles/show.torrent"
+    assert job.trackers == ("https://tracker.example/announce",)
+    assert job.webseeds == ("https://seed.example/file",)
+    assert job.private is False
+    assert job.piece_length == 20
+    assert job.include_patterns == ("*.mkv",)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "match"),
+    [
+        pytest.param("piece_length", 15, "between 16 and 27", id="piece_length_below_range"),
+        pytest.param("piece_length", 28, "between 16 and 27", id="piece_length_above_range"),
+        pytest.param("piece_length", True, "must be an integer", id="piece_length_boolean"),
+        pytest.param(
+            "trackers", ["https://tracker.example", 1], "list of strings", id="tracker_item"
+        ),
+        pytest.param("comment", 1, "must be a string", id="comment_type"),
+    ],
+)
+def test_batch_job_from_mapping_rejects_invalid_fields(
+    mkbrr_wizard: ModuleType,
+    field_name: str,
+    field_value: object,
+    match: str,
+) -> None:
+    raw_job: dict[str, object] = {
+        "path": "/data/show",
+        "output": "/torrentfiles/show.torrent",
+        field_name: field_value,
+    }
+
+    with pytest.raises(ValueError, match=match):
+        mkbrr_wizard.BatchJob.from_mapping(raw_job)
+
+
+def test_job_result_exposes_status_and_transport_tuple(mkbrr_wizard: ModuleType) -> None:
+    result = mkbrr_wizard.JobResult(
+        index=2,
+        content_path="/data/show",
+        output_path="/torrentfiles/show.torrent",
+        exit_code=0,
+    )
+
+    assert result.succeeded is True
+    assert result.as_tuple() == (
+        2,
+        "/data/show",
+        "/torrentfiles/show.torrent",
+        0,
+    )
+
+
+def test_build_batch_job_create_command_accepts_batch_job(
+    mkbrr_wizard: ModuleType, tmp_path: Path
+) -> None:
+    cfg = _sample_cfg(mkbrr_wizard, tmp_path)
+    job = mkbrr_wizard.BatchJob.from_mapping(
+        {
+            "path": str(tmp_path / "content.mkv"),
+            "output": str(tmp_path / "out.torrent"),
+            "private": False,
+        }
+    )
+
+    spec = mkbrr_wizard.build_batch_job_create_command(cfg, "native", "btn", job)
+
+    assert "--private=false" in spec.argv
 
 
 @pytest.mark.parametrize("private", [True, False])
@@ -304,7 +390,7 @@ def test_build_batch_job_create_command_emits_explicit_private_value(
     mkbrr_wizard: ModuleType, tmp_path: Path, private: bool
 ) -> None:
     cfg = _sample_cfg(mkbrr_wizard, tmp_path)
-    cmd, _ = mkbrr_wizard.build_batch_job_create_command(
+    spec = mkbrr_wizard.build_batch_job_create_command(
         cfg,
         "native",
         "btn",
@@ -315,7 +401,7 @@ def test_build_batch_job_create_command_emits_explicit_private_value(
         },
     )
 
-    assert f"--private={str(private).lower()}" in cmd
+    assert f"--private={str(private).lower()}" in spec.argv
 
 
 @pytest.mark.parametrize(
@@ -669,6 +755,47 @@ def test_main_batch_validation_failure_skips_execution(
     with pytest.raises(SystemExit):
         mkbrr_wizard.main()
     assert called["count"] == 0
+
+
+def test_main_batch_rejects_non_mapping_job_after_schema_validation(
+    tmp_path: Path, mkbrr_wizard: ModuleType, monkeypatch: Any
+) -> None:
+    config_yaml, _, _, _, _, content, output = _build_main_batch_test_files(
+        tmp_path, runtime="native", docker_support=False
+    )
+    monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
+    monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")
+    monkeypatch.setattr(mkbrr_wizard, "_has_prompt_toolkit", False)
+    monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", _Seq(["4", "1", "q"]))
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "collect_batch_jobs_interactive",
+        lambda cfg: {
+            "version": 1,
+            "jobs": [
+                {"output": str(output), "path": str(content)},
+                "not-a-mapping",
+            ],
+        },
+    )
+    monkeypatch.setattr(mkbrr_wizard, "validate_batch_payload", lambda payload, schema: [])
+
+    messages: list[str] = []
+    monkeypatch.setattr(
+        mkbrr_wizard.console,
+        "print",
+        lambda *args, **kwargs: messages.extend(str(arg) for arg in args),
+    )
+
+    def fail_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("subprocess.run should not be called for non-mapping jobs")
+
+    monkeypatch.setattr(mkbrr_wizard.subprocess, "run", fail_run)
+
+    with pytest.raises(SystemExit):
+        mkbrr_wizard.main()
+
+    assert any("Batch job 2 must be a mapping" in message for message in messages)
 
 
 def test_main_batch_duplicate_outputs_skip_all_execution(

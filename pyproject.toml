@@ -52,6 +52,7 @@ description = "Interactive CLI wizard for mkbrr with Rich UI support"
 requires-python = ">=3.10"
 dependencies = [
     "PyYAML>=6.0",
+    "pydantic>=2.7,<3",
     "rich>=14.2.0",
     "jsonschema>=4.0",
     "httpx[http2]>=0.28",
