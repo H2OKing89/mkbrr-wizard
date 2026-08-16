@@ -104,6 +104,25 @@ def test_validate_batch_payload_success(mkbrr_wizard: ModuleType) -> None:
     assert errors == []
 
 
+@pytest.mark.parametrize("piece_length", [16, 27])
+def test_validate_batch_payload_accepts_piece_length_boundaries(
+    mkbrr_wizard: ModuleType, piece_length: int
+) -> None:
+    schema = mkbrr_wizard.load_batch_schema()
+    payload = {
+        "version": 1,
+        "jobs": [
+            {
+                "output": "/torrentfiles/movie1.torrent",
+                "path": "/data/movie1.mkv",
+                "piece_length": piece_length,
+            }
+        ],
+    }
+
+    assert mkbrr_wizard.validate_batch_payload(payload, schema) == []
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -135,6 +154,26 @@ def test_validate_batch_payload_failures(mkbrr_wizard: ModuleType, payload: dict
     schema = mkbrr_wizard.load_batch_schema()
     errors = mkbrr_wizard.validate_batch_payload(payload, schema)
     assert errors
+
+
+def test_validate_batch_payload_rejects_duplicate_normalized_outputs(
+    mkbrr_wizard: ModuleType,
+) -> None:
+    schema = mkbrr_wizard.load_batch_schema()
+    payload = {
+        "version": 1,
+        "jobs": [
+            {"output": "/torrentfiles/movie.torrent", "path": "/data/movie-a.mkv"},
+            {"output": "/torrentfiles/./movie.torrent", "path": "/data/movie-b.mkv"},
+        ],
+    }
+
+    errors = mkbrr_wizard.validate_batch_payload(payload, schema)
+
+    assert errors == [
+        "jobs.1.output: duplicates jobs.0.output after path resolution: "
+        "/torrentfiles/movie.torrent"
+    ]
 
 
 def test_map_batch_job_paths_docker(mkbrr_wizard: ModuleType, tmp_path: Path) -> None:
@@ -174,6 +213,36 @@ def test_map_batch_job_output_uses_content_fallback(
     assert job["output"] == "/data/custom/movie1.torrent"
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "configured_root"),
+    [
+        pytest.param("path", "/srv/media/movie.mkv", "paths.host_data_root", id="content"),
+        pytest.param(
+            "output",
+            "/srv/torrents/movie.torrent",
+            "paths.host_output_dir",
+            id="output",
+        ),
+    ],
+)
+def test_map_batch_job_paths_rejects_paths_outside_docker_mounts(
+    mkbrr_wizard: ModuleType,
+    tmp_path: Path,
+    field: str,
+    value: str,
+    configured_root: str,
+) -> None:
+    cfg = _sample_cfg(mkbrr_wizard, tmp_path)
+    job = {
+        "path": f"{cfg.paths.host_data_root}/movies/movie.mkv",
+        "output": f"{cfg.paths.host_output_dir}/movie.torrent",
+    }
+    job[field] = value
+
+    with pytest.raises(ValueError, match=configured_root):
+        mkbrr_wizard.map_batch_job_paths(cfg, "docker", {"version": 1, "jobs": [job]})
+
+
 def test_build_batch_job_create_command_native_and_docker(
     mkbrr_wizard: ModuleType, tmp_path: Path
 ) -> None:
@@ -205,7 +274,7 @@ def test_build_batch_job_create_command_native_and_docker(
     assert "-P" in native_cmd
     assert "--output" in native_cmd
     assert "--tracker" in native_cmd
-    assert "--private" in native_cmd
+    assert "--private=true" in native_cmd
     assert "--no-date" not in native_cmd
     assert "--entropy" in native_cmd
     assert native_cwd == cfg.paths.host_output_dir
@@ -228,6 +297,51 @@ def test_build_batch_job_create_command_native_and_docker(
     assert "-P" in docker_cmd
     assert "--output" in docker_cmd
     assert docker_cwd is None
+
+
+@pytest.mark.parametrize("private", [True, False])
+def test_build_batch_job_create_command_emits_explicit_private_value(
+    mkbrr_wizard: ModuleType, tmp_path: Path, private: bool
+) -> None:
+    cfg = _sample_cfg(mkbrr_wizard, tmp_path)
+    cmd, _ = mkbrr_wizard.build_batch_job_create_command(
+        cfg,
+        "native",
+        "btn",
+        {
+            "path": str(tmp_path / "content.mkv"),
+            "output": str(tmp_path / "out.torrent"),
+            "private": private,
+        },
+    )
+
+    assert f"--private={str(private).lower()}" in cmd
+
+
+@pytest.mark.parametrize(
+    ("piece_length", "expected"),
+    [
+        pytest.param(15, None, id="below_minimum"),
+        pytest.param(16, 16, id="minimum"),
+        pytest.param(27, 27, id="maximum"),
+        pytest.param(28, None, id="above_maximum"),
+    ],
+)
+def test_collect_job_optional_settings_uses_mkbrr_piece_length_range(
+    mkbrr_wizard: ModuleType,
+    monkeypatch: Any,
+    piece_length: int,
+    expected: int | None,
+) -> None:
+    monkeypatch.setattr(
+        mkbrr_wizard.Prompt,
+        "ask",
+        _Seq(["", "skip", str(piece_length), "", "", "skip", "skip", "", "", ""]),
+    )
+
+    result = mkbrr_wizard._collect_job_optional_settings(None, 1)
+
+    assert result.get("piece_length") == expected
 
 
 def test_build_batch_job_create_command_rejects_empty_content_path(
@@ -388,11 +502,11 @@ def test_main_batch_success_native(tmp_path, mkbrr_wizard: ModuleType, monkeypat
         return Dummy(0)
 
     monkeypatch.setattr(mkbrr_wizard.subprocess, "run", fake_run)
-    chown_called = {"count": 0}
+    chown_paths: list[str] = []
     monkeypatch.setattr(
         mkbrr_wizard,
         "maybe_fix_torrent_permissions",
-        lambda cfg: chown_called.__setitem__("count", chown_called["count"] + 1),
+        lambda cfg, paths: chown_paths.extend(paths),
     )
 
     mkbrr_wizard.main()
@@ -404,7 +518,7 @@ def test_main_batch_success_native(tmp_path, mkbrr_wizard: ModuleType, monkeypat
     assert "-b" not in cmd
     assert "-P" in cmd
     assert "--output" in cmd
-    assert chown_called["count"] == 1
+    assert chown_paths == [str(output)]
 
 
 def test_main_batch_success_docker(tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:
@@ -445,11 +559,11 @@ def test_main_batch_success_docker(tmp_path, mkbrr_wizard: ModuleType, monkeypat
         "run",
         lambda cmd, *a, **k: _run_and_record(calls, cmd, Dummy),
     )
-    chown_called = {"count": 0}
+    chown_paths: list[str] = []
     monkeypatch.setattr(
         mkbrr_wizard,
         "maybe_fix_torrent_permissions",
-        lambda cfg: chown_called.__setitem__("count", chown_called["count"] + 1),
+        lambda cfg, paths: chown_paths.extend(paths),
     )
 
     mkbrr_wizard.main()
@@ -460,7 +574,7 @@ def test_main_batch_success_docker(tmp_path, mkbrr_wizard: ModuleType, monkeypat
     assert "-b" not in cmd
     assert "-P" in cmd
     assert "--output" in cmd
-    assert chown_called["count"] == 1
+    assert chown_paths == [str(output)]
 
 
 def test_main_batch_success_advanced_mode_prompts_optional(
@@ -516,7 +630,7 @@ def test_main_batch_success_advanced_mode_prompts_optional(
         "run",
         lambda cmd, *a, **k: _run_and_record(calls, cmd, Dummy),
     )
-    monkeypatch.setattr(mkbrr_wizard, "maybe_fix_torrent_permissions", lambda cfg: None)
+    monkeypatch.setattr(mkbrr_wizard, "maybe_fix_torrent_permissions", lambda cfg, paths: None)
 
     mkbrr_wizard.main()
     assert len(calls) == 1
@@ -557,6 +671,39 @@ def test_main_batch_validation_failure_skips_execution(
     assert called["count"] == 0
 
 
+def test_main_batch_duplicate_outputs_skip_all_execution(
+    tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
+) -> None:
+    config_yaml, _, _, _, _, _, _ = _build_main_batch_test_files(
+        tmp_path, runtime="native", docker_support=False
+    )
+
+    monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
+    monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")
+    monkeypatch.setattr(mkbrr_wizard, "_has_prompt_toolkit", False)
+    monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", _Seq(["4", "1", "q"]))
+    duplicate_output = tmp_path / "same.torrent"
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "collect_batch_jobs_interactive",
+        lambda cfg: {
+            "version": 1,
+            "jobs": [
+                {"output": str(duplicate_output), "path": str(tmp_path / "a.mkv")},
+                {"output": str(duplicate_output), "path": str(tmp_path / "b.mkv")},
+            ],
+        },
+    )
+
+    def fail_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("subprocess.run should not be called for duplicate outputs")
+
+    monkeypatch.setattr(mkbrr_wizard.subprocess, "run", fail_run)
+
+    with pytest.raises(SystemExit):
+        mkbrr_wizard.main()
+
+
 def test_main_batch_nonzero_exit_skips_chown(
     tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
 ) -> None:
@@ -590,7 +737,7 @@ def test_main_batch_nonzero_exit_skips_chown(
     monkeypatch.setattr(
         mkbrr_wizard,
         "maybe_fix_torrent_permissions",
-        lambda cfg: chown_called.__setitem__("count", chown_called["count"] + 1),
+        lambda cfg, paths: chown_called.__setitem__("count", chown_called["count"] + 1),
     )
 
     mkbrr_wizard.main()
@@ -640,17 +787,17 @@ def test_main_batch_continue_on_error_and_chown_once(
 
     monkeypatch.setattr(mkbrr_wizard.subprocess, "run", fake_run)
 
-    chown_called = {"count": 0}
+    chown_paths: list[str] = []
     monkeypatch.setattr(
         mkbrr_wizard,
         "maybe_fix_torrent_permissions",
-        lambda cfg: chown_called.__setitem__("count", chown_called["count"] + 1),
+        lambda cfg, paths: chown_paths.extend(paths),
     )
 
     mkbrr_wizard.main()
     assert calls["count"] == 2
     assert not run_codes
-    assert chown_called["count"] == 1
+    assert chown_paths == [str(out_b)]
 
 
 def test_main_batch_timeout_marks_failed_and_continues(
@@ -724,7 +871,7 @@ def test_main_batch_timeout_marks_failed_and_continues(
     monkeypatch.setattr(
         mkbrr_wizard,
         "maybe_fix_torrent_permissions",
-        lambda cfg: chown_called.__setitem__("count", chown_called["count"] + 1),
+        lambda cfg, paths: chown_called.__setitem__("count", chown_called["count"] + 1),
     )
 
     mkbrr_wizard.main()

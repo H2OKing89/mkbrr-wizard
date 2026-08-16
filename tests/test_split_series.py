@@ -34,6 +34,10 @@ def sample_cfg(mkbrr_wizard: ModuleType) -> Any:
     )
 
 
+def _s01(episodes: list[int]) -> list[tuple[int, int]]:
+    return [(1, episode) for episode in episodes]
+
+
 # ---------------------------------------------------------------------------
 # scan_episodes
 # ---------------------------------------------------------------------------
@@ -46,8 +50,8 @@ class TestScanEpisodes:
             (tmp_path / f"Show.S01E{ep:02d}.1080p.mkv").write_text("x")
         result = mkbrr_wizard.scan_episodes(str(tmp_path))
         assert len(result) == 12
-        assert result[0] == (1, "Show.S01E01.1080p.mkv")
-        assert result[-1] == (12, "Show.S01E12.1080p.mkv")
+        assert result[0] == ((1, 1), "Show.S01E01.1080p.mkv")
+        assert result[-1] == ((1, 12), "Show.S01E12.1080p.mkv")
 
     def test_mixed_extensions(self, tmp_path, mkbrr_wizard: ModuleType) -> None:
         """Only video files are returned."""
@@ -59,7 +63,7 @@ class TestScanEpisodes:
         (tmp_path / "Show.S01E06.jpg").write_text("x")
         result = mkbrr_wizard.scan_episodes(str(tmp_path))
         assert len(result) == 3
-        assert [ep for ep, _ in result] == [1, 2, 3]
+        assert [episode_key for episode_key, _ in result] == _s01([1, 2, 3])
 
     def test_non_episode_video_files_skipped(self, tmp_path, mkbrr_wizard: ModuleType) -> None:
         """Video files without S##E## naming are skipped."""
@@ -91,21 +95,60 @@ class TestScanEpisodes:
         (tmp_path / "Show.S01E02.mkv").write_text("x")
         result = mkbrr_wizard.scan_episodes(str(tmp_path))
         assert len(result) == 1
-        assert result[0][0] == 2
+        assert result[0][0] == (1, 2)
 
-    def test_multi_episode_takes_first(self, tmp_path, mkbrr_wizard: ModuleType) -> None:
-        """S01E01E02 files use the first episode number."""
-        (tmp_path / "Show.S01E01E02.mkv").write_text("x")
+    @pytest.mark.parametrize(
+        "episode_tag",
+        ["S01E01E02", "S01E01-E02", "S01E01-02"],
+    )
+    def test_multi_episode_files_expose_every_episode_key(
+        self, tmp_path, mkbrr_wizard: ModuleType, episode_tag: str
+    ) -> None:
+        filename = f"Show.{episode_tag}.mkv"
+        (tmp_path / filename).write_text("x")
         result = mkbrr_wizard.scan_episodes(str(tmp_path))
-        assert len(result) == 1
-        assert result[0][0] == 1
+        assert result == [((1, 1), filename), ((1, 2), filename)]
+
+    def test_mixed_seasons_have_distinct_episode_keys(
+        self, tmp_path, mkbrr_wizard: ModuleType
+    ) -> None:
+        (tmp_path / "Show.S01E01.mkv").write_text("x")
+        (tmp_path / "Show.S02E01.mkv").write_text("x")
+
+        result = mkbrr_wizard.scan_episodes(str(tmp_path))
+
+        assert result == [
+            ((1, 1), "Show.S01E01.mkv"),
+            ((2, 1), "Show.S02E01.mkv"),
+        ]
+
+    @pytest.mark.parametrize(
+        ("episode_tag", "expected_episodes"),
+        [
+            pytest.param("S01E01-E03", [1, 2, 3], id="inclusive_range"),
+            pytest.param("S01E01E03", [1, 3], id="explicit_chain"),
+        ],
+    )
+    def test_multi_episode_range_semantics(
+        self,
+        tmp_path,
+        mkbrr_wizard: ModuleType,
+        episode_tag: str,
+        expected_episodes: list[int],
+    ) -> None:
+        filename = f"Show.{episode_tag}.mkv"
+        (tmp_path / filename).write_text("x")
+
+        result = mkbrr_wizard.scan_episodes(str(tmp_path))
+
+        assert [episode_key for episode_key, _ in result] == _s01(expected_episodes)
 
     def test_gap_in_episodes(self, tmp_path, mkbrr_wizard: ModuleType) -> None:
         """Gaps are preserved (not filled in)."""
         for ep in [1, 2, 5, 10]:
             (tmp_path / f"Show.S01E{ep:02d}.mkv").write_text("x")
         result = mkbrr_wizard.scan_episodes(str(tmp_path))
-        assert [ep for ep, _ in result] == [1, 2, 5, 10]
+        assert [episode_key for episode_key, _ in result] == _s01([1, 2, 5, 10])
 
     def test_ts_and_m2ts_extensions(self, tmp_path, mkbrr_wizard: ModuleType) -> None:
         (tmp_path / "Show.S01E01.ts").write_text("x")
@@ -121,25 +164,31 @@ class TestScanEpisodes:
 
 class TestFormatEpisodeRanges:
     def test_contiguous(self, mkbrr_wizard: ModuleType) -> None:
-        assert mkbrr_wizard.format_episode_ranges([1, 2, 3, 4, 5]) == "E01-E05"
+        assert mkbrr_wizard.format_episode_ranges(_s01([1, 2, 3, 4, 5])) == "E01-E05"
 
     def test_single_episodes(self, mkbrr_wizard: ModuleType) -> None:
-        assert mkbrr_wizard.format_episode_ranges([3, 7]) == "E03, E07"
+        assert mkbrr_wizard.format_episode_ranges(_s01([3, 7])) == "E03, E07"
 
     def test_mixed(self, mkbrr_wizard: ModuleType) -> None:
-        assert mkbrr_wizard.format_episode_ranges([1, 2, 3, 5, 6, 8]) == "E01-E03, E05-E06, E08"
+        assert (
+            mkbrr_wizard.format_episode_ranges(_s01([1, 2, 3, 5, 6, 8])) == "E01-E03, E05-E06, E08"
+        )
 
     def test_empty(self, mkbrr_wizard: ModuleType) -> None:
         assert mkbrr_wizard.format_episode_ranges([]) == ""
 
     def test_single(self, mkbrr_wizard: ModuleType) -> None:
-        assert mkbrr_wizard.format_episode_ranges([1]) == "E01"
+        assert mkbrr_wizard.format_episode_ranges(_s01([1])) == "E01"
 
     def test_sakamoto_gaps(self, mkbrr_wizard: ModuleType) -> None:
         """Mirrors the user's example: E01-E14, E17-E18, E20-E21."""
         eps = list(range(1, 15)) + [17, 18, 20, 21]
-        result = mkbrr_wizard.format_episode_ranges(eps)
+        result = mkbrr_wizard.format_episode_ranges(_s01(eps))
         assert result == "E01-E14, E17-E18, E20-E21"
+
+    def test_mixed_seasons_include_season_identity(self, mkbrr_wizard: ModuleType) -> None:
+        result = mkbrr_wizard.format_episode_ranges([(1, 1), (1, 2), (2, 1), (2, 2)])
+        assert result == "S01E01-E02, S02E01-E02"
 
 
 # ---------------------------------------------------------------------------
@@ -149,57 +198,61 @@ class TestFormatEpisodeRanges:
 
 class TestParseSplitRanges:
     def test_basic_two_parts(self, mkbrr_wizard: ModuleType) -> None:
-        available = list(range(1, 23))
+        available = _s01(list(range(1, 23)))
         parts = mkbrr_wizard.parse_split_ranges("1-11, 12-22", available)
         assert len(parts) == 2
-        assert parts[0] == list(range(1, 12))
-        assert parts[1] == list(range(12, 23))
+        assert parts[0] == _s01(list(range(1, 12)))
+        assert parts[1] == _s01(list(range(12, 23)))
 
     def test_three_parts(self, mkbrr_wizard: ModuleType) -> None:
-        available = list(range(1, 25))
+        available = _s01(list(range(1, 25)))
         parts = mkbrr_wizard.parse_split_ranges("1-8, 9-16, 17-24", available)
         assert len(parts) == 3
 
     def test_semicolon_separator(self, mkbrr_wizard: ModuleType) -> None:
-        available = list(range(1, 23))
+        available = _s01(list(range(1, 23)))
         parts = mkbrr_wizard.parse_split_ranges("1-11; 12-22", available)
         assert len(parts) == 2
 
     def test_gaps_in_available(self, mkbrr_wizard: ModuleType) -> None:
         """Range 1-14 but episodes 15-16 missing, 17-22 present."""
-        available = list(range(1, 15)) + [17, 18, 20, 21]
+        available = _s01(list(range(1, 15)) + [17, 18, 20, 21])
         parts = mkbrr_wizard.parse_split_ranges("1-11, 12-22", available)
-        assert parts[0] == list(range(1, 12))
+        assert parts[0] == _s01(list(range(1, 12)))
         # Part 2 only has available episodes within 12-22
-        assert parts[1] == [12, 13, 14, 17, 18, 20, 21]
+        assert parts[1] == _s01([12, 13, 14, 17, 18, 20, 21])
 
     def test_overlap_raises(self, mkbrr_wizard: ModuleType) -> None:
-        available = list(range(1, 23))
+        available = _s01(list(range(1, 23)))
         with pytest.raises(ValueError, match="Overlapping"):
             mkbrr_wizard.parse_split_ranges("1-12, 10-22", available)
 
     def test_empty_range_raises(self, mkbrr_wizard: ModuleType) -> None:
-        available = list(range(1, 11))
+        available = _s01(list(range(1, 11)))
         with pytest.raises(ValueError, match="no episodes found"):
             mkbrr_wizard.parse_split_ranges("1-5, 20-30", available)
 
     def test_single_part_allowed(self, mkbrr_wizard: ModuleType) -> None:
-        available = list(range(1, 23))
+        available = _s01(list(range(1, 23)))
         parts = mkbrr_wizard.parse_split_ranges("1-22", available)
         assert len(parts) == 1
-        assert parts[0] == list(range(1, 23))
+        assert parts[0] == _s01(list(range(1, 23)))
 
     def test_invalid_token_raises(self, mkbrr_wizard: ModuleType) -> None:
         with pytest.raises(ValueError, match="Invalid range token"):
-            mkbrr_wizard.parse_split_ranges("abc, 12-22", [1, 2, 3])
+            mkbrr_wizard.parse_split_ranges("abc, 12-22", _s01([1, 2, 3]))
 
     def test_reversed_range_raises(self, mkbrr_wizard: ModuleType) -> None:
         with pytest.raises(ValueError, match="start > end"):
-            mkbrr_wizard.parse_split_ranges("11-1, 12-22", list(range(1, 23)))
+            mkbrr_wizard.parse_split_ranges("11-1, 12-22", _s01(list(range(1, 23))))
 
     def test_no_ranges_raises(self, mkbrr_wizard: ModuleType) -> None:
         with pytest.raises(ValueError, match="No ranges"):
-            mkbrr_wizard.parse_split_ranges("", [1, 2, 3])
+            mkbrr_wizard.parse_split_ranges("", _s01([1, 2, 3]))
+
+    def test_mixed_seasons_require_separate_source_folders(self, mkbrr_wizard: ModuleType) -> None:
+        with pytest.raises(ValueError, match="multiple seasons"):
+            mkbrr_wizard.parse_split_ranges("1-2", [(1, 1), (1, 2), (2, 1), (2, 2)])
 
 
 # ---------------------------------------------------------------------------
@@ -210,33 +263,54 @@ class TestParseSplitRanges:
 class TestBuildSplitIncludePatterns:
     def test_basic_patterns(self, mkbrr_wizard: ModuleType) -> None:
         episodes = [
-            (1, "Show.S01E01.1080p.mkv"),
-            (2, "Show.S01E02.1080p.mkv"),
-            (3, "Show.S01E03.1080p.mkv"),
+            ((1, 1), "Show.S01E01.1080p.mkv"),
+            ((1, 2), "Show.S01E02.1080p.mkv"),
+            ((1, 3), "Show.S01E03.1080p.mkv"),
         ]
-        patterns = mkbrr_wizard.build_split_include_patterns(episodes, [1, 3])
+        patterns = mkbrr_wizard.build_split_include_patterns(episodes, _s01([1, 3]))
         assert patterns == ["*S01E01*", "*S01E03*"]
 
     def test_preserves_case_from_filename(self, mkbrr_wizard: ModuleType) -> None:
-        episodes = [(1, "show.s01e01.mkv")]
-        patterns = mkbrr_wizard.build_split_include_patterns(episodes, [1])
+        episodes = [((1, 1), "show.s01e01.mkv")]
+        patterns = mkbrr_wizard.build_split_include_patterns(episodes, _s01([1]))
         # Pattern uses original case from filename
         assert patterns == ["*s01e01*"]
 
     def test_missing_episode_skipped(self, mkbrr_wizard: ModuleType) -> None:
         """If an episode number isn't in the scan results, it's simply skipped."""
-        episodes = [(1, "Show.S01E01.mkv"), (3, "Show.S01E03.mkv")]
-        patterns = mkbrr_wizard.build_split_include_patterns(episodes, [1, 2, 3])
+        episodes = [((1, 1), "Show.S01E01.mkv"), ((1, 3), "Show.S01E03.mkv")]
+        patterns = mkbrr_wizard.build_split_include_patterns(episodes, _s01([1, 2, 3]))
         assert patterns == ["*S01E01*", "*S01E03*"]
 
     def test_sorted_output(self, mkbrr_wizard: ModuleType) -> None:
         episodes = [
-            (5, "Show.S01E05.mkv"),
-            (2, "Show.S01E02.mkv"),
-            (8, "Show.S01E08.mkv"),
+            ((1, 5), "Show.S01E05.mkv"),
+            ((1, 2), "Show.S01E02.mkv"),
+            ((1, 8), "Show.S01E08.mkv"),
         ]
-        patterns = mkbrr_wizard.build_split_include_patterns(episodes, [8, 2, 5])
+        patterns = mkbrr_wizard.build_split_include_patterns(episodes, _s01([8, 2, 5]))
         assert patterns == ["*S01E02*", "*S01E05*", "*S01E08*"]
+
+    def test_season_keys_prevent_cross_season_collisions(self, mkbrr_wizard: ModuleType) -> None:
+        episodes = [
+            ((1, 1), "Show.S01E01.mkv"),
+            ((2, 1), "Show.S02E01.mkv"),
+        ]
+
+        patterns = mkbrr_wizard.build_split_include_patterns(episodes, [(1, 1)])
+
+        assert patterns == ["*S01E01*"]
+
+    def test_multi_episode_file_must_remain_in_one_part(self, mkbrr_wizard: ModuleType) -> None:
+        filename = "Show.S01E01E02.mkv"
+        episodes = [((1, 1), filename), ((1, 2), filename)]
+
+        with pytest.raises(ValueError, match="Multi-episode file"):
+            mkbrr_wizard.build_split_include_patterns(episodes, [(1, 1)])
+
+        assert mkbrr_wizard.build_split_include_patterns(episodes, [(1, 1), (1, 2)]) == [
+            "*S01E01E02*"
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +350,7 @@ class TestRenderSplitSummary:
     def test_renders_without_error(self, mkbrr_wizard: ModuleType) -> None:
         mkbrr_wizard.render_split_summary(
             "Show.S01",
-            [[1, 2, 3], [4, 5, 6]],
+            [_s01([1, 2, 3]), _s01([4, 5, 6])],
             [["*S01E01*", "*S01E02*", "*S01E03*"], ["*S01E04*", "*S01E05*", "*S01E06*"]],
             "/output",
         )

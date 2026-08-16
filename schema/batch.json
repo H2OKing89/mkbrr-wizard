@@ -60,8 +60,8 @@
           "piece_length": {
             "type": "integer",
             "description": "Piece length exponent (2^n bytes)",
-            "minimum": 14,
-            "maximum": 24
+            "minimum": 16,
+            "maximum": 27
           },
           "comment": {
             "type": "string",

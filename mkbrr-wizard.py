@@ -105,6 +105,11 @@ THEME = Theme(
 )
 console = Console(theme=THEME, highlight=False)
 
+MKBRR_TESTED_VERSION = "1.24.1"
+MKBRR_MIN_SUPPORTED_VERSION = (1, 24, 0)
+MKBRR_NEXT_UNSUPPORTED_VERSION = (2, 0, 0)
+DEFAULT_MKBRR_IMAGE = f"ghcr.io/autobrr/mkbrr:v{MKBRR_TESTED_VERSION}"
+
 
 # ----------------------------
 # Config + parsing
@@ -279,7 +284,7 @@ def load_config(path: Path) -> AppCfg:
     mkbrr_node: dict[str, Any] = cast(dict[str, Any], raw.get("mkbrr") or {})
     mkbrr = MkbrrCfg(
         binary=str(mkbrr_node.get("binary", "mkbrr")).strip(),
-        image=str(mkbrr_node.get("image", "ghcr.io/autobrr/mkbrr")).strip(),
+        image=str(mkbrr_node.get("image", DEFAULT_MKBRR_IMAGE)).strip(),
     )
 
     paths_node: dict[str, Any] = cast(dict[str, Any], raw.get("paths") or {})
@@ -544,6 +549,22 @@ def detect_mkbrr_version(cfg: AppCfg, runtime: str) -> str:
     return "unknown"
 
 
+def verify_mkbrr_compatibility(version: str) -> None:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?", version.strip())
+    if match is None:
+        raise RuntimeError(
+            "Could not verify the mkbrr version. "
+            f"This wizard supports mkbrr >=1.24.0,<2.0.0 and tests against {MKBRR_TESTED_VERSION}."
+        )
+
+    parsed = tuple(int(part) for part in match.groups())
+    if not MKBRR_MIN_SUPPORTED_VERSION <= parsed < MKBRR_NEXT_UNSUPPORTED_VERSION:
+        raise RuntimeError(
+            f"mkbrr {version} is not supported. "
+            f"Use mkbrr >=1.24.0,<2.0.0; tested version: {MKBRR_TESTED_VERSION}."
+        )
+
+
 # ----------------------------
 # Path mapping (content + torrent files)
 # ----------------------------
@@ -603,6 +624,62 @@ def map_torrent_path(cfg: AppCfg, runtime: str, raw: str) -> str:
         ):
             return cfg.paths.host_output_dir + raw[len(cfg.paths.container_output_dir) :]
         return os.path.abspath(raw)
+
+
+def _is_under_root(path: str, root: str) -> bool:
+    normalized_path = os.path.normpath(path)
+    normalized_root = os.path.normpath(root)
+    try:
+        return os.path.commonpath((normalized_path, normalized_root)) == normalized_root
+    except ValueError:
+        return False
+
+
+def _require_mapped_docker_path(
+    path: str,
+    *,
+    context: str,
+    configured_roots: tuple[tuple[str, str, str], ...],
+) -> None:
+    if any(_is_under_root(path, container_root) for _, _, container_root in configured_roots):
+        return
+
+    expected = " or ".join(
+        f"{name} ({host_root} on host, {container_root} in container)"
+        for name, host_root, container_root in configured_roots
+    )
+    raise ValueError(
+        f"{context} is outside configured Docker mounts: {path}. Use a path under {expected}."
+    )
+
+
+def resolve_mounted_torrent_path(
+    cfg: AppCfg,
+    runtime: str,
+    raw: str,
+    *,
+    context: str,
+) -> str:
+    mapped = map_torrent_path(cfg, runtime, raw)
+    if runtime != "docker":
+        return mapped
+
+    if not _is_under_root(mapped, cfg.paths.container_output_dir):
+        mapped = map_content_path(cfg, runtime, raw)
+
+    _require_mapped_docker_path(
+        mapped,
+        context=context,
+        configured_roots=(
+            (
+                "paths.host_output_dir",
+                cfg.paths.host_output_dir,
+                cfg.paths.container_output_dir,
+            ),
+            ("paths.host_data_root", cfg.paths.host_data_root, cfg.paths.container_data_root),
+        ),
+    )
+    return mapped
 
 
 def _natural_disk_sort_key(path: str) -> tuple[int, str]:
@@ -837,6 +914,18 @@ def resolve_unraid_content_path(cfg: AppCfg, runtime: str, raw: str) -> tuple[st
     """Return (content_path_for_runtime, host_data_root_override_for_docker)."""
     mapped = map_content_path(cfg, runtime, raw)
     if not cfg.unraid.enabled:
+        if runtime == "docker":
+            _require_mapped_docker_path(
+                mapped,
+                context="Content path",
+                configured_roots=(
+                    (
+                        "paths.host_data_root",
+                        cfg.paths.host_data_root,
+                        cfg.paths.container_data_root,
+                    ),
+                ),
+            )
         return mapped, None
 
     host_view = map_content_path(cfg, "native", mapped)
@@ -849,6 +938,17 @@ def resolve_unraid_content_path(cfg: AppCfg, runtime: str, raw: str) -> tuple[st
             resolved_host.startswith(host_override + "/") or resolved_host == host_override
         ):
             mapped_resolved = cfg.paths.container_data_root + resolved_host[len(host_override) :]
+        _require_mapped_docker_path(
+            mapped_resolved,
+            context="Content path",
+            configured_roots=(
+                (
+                    "paths.host_data_root",
+                    host_override or cfg.paths.host_data_root,
+                    cfg.paths.container_data_root,
+                ),
+            ),
+        )
         return mapped_resolved, host_override
 
     return resolved_host, None
@@ -1027,20 +1127,21 @@ def preflight_unraid_split_share(
 # ----------------------------
 
 _VIDEO_EXTENSIONS = frozenset((".mkv", ".mp4", ".avi", ".ts", ".m2ts"))
+EpisodeKey = tuple[int, int]
 
-# Matches S01E02, s01e02, S01E01E02 (captures first episode number only)
-_EPISODE_RE = re.compile(r"S(\d{2,})E(\d{2,})", re.IGNORECASE)
+# Matches S01E02 plus chained/ranged forms: S01E01E02, S01E01-E02, S01E01-02.
+_EPISODE_RE = re.compile(r"S(\d{2,})E(\d{2,})((?:(?:-?E|-)\d{2,})*)", re.IGNORECASE)
+_ADDITIONAL_EPISODE_RE = re.compile(r"(-?E|-)(\d{2,})", re.IGNORECASE)
 
 
-def scan_episodes(directory: str) -> list[tuple[int, str]]:
+def scan_episodes(directory: str) -> list[tuple[EpisodeKey, str]]:
     """Scan *directory* for video files with S##E## names.
 
-    Returns a sorted list of ``(episode_number, filename)`` tuples.
-    Only the **first** episode number in each filename is used (multi-episode
-    files like ``S01E01E02`` map to the first ``E##``).
+    Returns one ``((season, episode), filename)`` tuple per episode identity.
+    Multi-episode files therefore produce multiple entries with the same filename.
     Non-video files and files without an episode tag are silently skipped.
     """
-    results: list[tuple[int, str]] = []
+    results: list[tuple[EpisodeKey, str]] = []
     try:
         entries = os.listdir(directory)
     except OSError:
@@ -1053,43 +1154,72 @@ def scan_episodes(directory: str) -> list[tuple[int, str]]:
         ext = os.path.splitext(name)[1].lower()
         if ext not in _VIDEO_EXTENSIONS:
             continue
-        m = _EPISODE_RE.search(name)
-        if m:
-            ep_num = int(m.group(2))
-            results.append((ep_num, name))
+        seen_keys: set[EpisodeKey] = set()
+        for match in _EPISODE_RE.finditer(name):
+            season = int(match.group(1))
+            first_episode = int(match.group(2))
+            episode_numbers = [first_episode]
+            previous_episode = first_episode
+            for separator, number in _ADDITIONAL_EPISODE_RE.findall(match.group(3)):
+                episode = int(number)
+                if separator.startswith("-") and episode > previous_episode:
+                    episode_numbers.extend(range(previous_episode + 1, episode + 1))
+                else:
+                    episode_numbers.append(episode)
+                previous_episode = episode
+            for episode in episode_numbers:
+                key = (season, episode)
+                if key not in seen_keys:
+                    results.append((key, name))
+                    seen_keys.add(key)
 
-    results.sort(key=lambda t: t[0])
+    results.sort(key=lambda item: (item[0], item[1].casefold()))
     return results
 
 
-def format_episode_ranges(episode_numbers: list[int]) -> str:
-    """Format a list of episode numbers into a compact range string.
-
-    Example: ``[1, 2, 3, 5, 6, 8]`` → ``"E01-E03, E05-E06, E08"``.
-    """
-    if not episode_numbers:
-        return ""
-    nums = sorted(episode_numbers)
+def _format_episode_number_ranges(episode_numbers: list[int], season: int | None) -> list[str]:
     ranges: list[str] = []
-    start = end = nums[0]
-    for n in nums[1:]:
-        if n == end + 1:
-            end = n
-        else:
-            if start == end:
-                ranges.append(f"E{start:02d}")
-            else:
-                ranges.append(f"E{start:02d}-E{end:02d}")
-            start = end = n
-    if start == end:
-        ranges.append(f"E{start:02d}")
-    else:
-        ranges.append(f"E{start:02d}-E{end:02d}")
+    start = end = episode_numbers[0]
+    prefix = f"S{season:02d}" if season is not None else ""
+    for number in episode_numbers[1:]:
+        if number == end + 1:
+            end = number
+            continue
+        ranges.append(
+            f"{prefix}E{start:02d}" if start == end else f"{prefix}E{start:02d}-E{end:02d}"
+        )
+        start = end = number
+    ranges.append(f"{prefix}E{start:02d}" if start == end else f"{prefix}E{start:02d}-E{end:02d}")
+    return ranges
+
+
+def format_episode_ranges(episode_keys: list[EpisodeKey]) -> str:
+    """Format episode identities into compact season-aware ranges.
+
+    A single season keeps the compact ``E01-E03`` display. Mixed seasons are
+    rendered as ``S01E01-E03, S02E01-E03``.
+    """
+    if not episode_keys:
+        return ""
+
+    episodes_by_season: dict[int, set[int]] = {}
+    for season, episode in episode_keys:
+        episodes_by_season.setdefault(season, set()).add(episode)
+
+    show_season = len(episodes_by_season) > 1
+    ranges: list[str] = []
+    for season, episode_numbers in sorted(episodes_by_season.items()):
+        ranges.extend(
+            _format_episode_number_ranges(
+                sorted(episode_numbers),
+                season if show_season else None,
+            )
+        )
     return ", ".join(ranges)
 
 
-def parse_split_ranges(input_str: str, available: list[int]) -> list[list[int]]:
-    """Parse a user-supplied split specification into episode-number lists.
+def parse_split_ranges(input_str: str, available: list[EpisodeKey]) -> list[list[EpisodeKey]]:
+    """Parse a single-season split specification into episode-key lists.
 
     *input_str* uses range notation separated by ``,`` or ``;`` where each
     range is ``start-end`` (inclusive).  Example: ``"1-11, 12-22"``.
@@ -1102,8 +1232,18 @@ def parse_split_ranges(input_str: str, available: list[int]) -> list[list[int]]:
     * a range that references zero available episodes
     * unparseable tokens
     """
-    available_set = set(available)
-    parts: list[list[int]] = []
+    seasons = {season for season, _ in available}
+    if len(seasons) > 1:
+        raise ValueError(
+            "Cannot split a folder containing multiple seasons; use a separate source folder "
+            "for each season"
+        )
+    if not seasons:
+        raise ValueError("No episodes available to split")
+
+    season = next(iter(seasons))
+    available_numbers = {episode for _, episode in available}
+    parts: list[list[EpisodeKey]] = []
     seen: set[int] = set()
 
     # Normalize separators: "1-11; 12-22" -> "1-11, 12-22"
@@ -1126,37 +1266,45 @@ def parse_split_ranges(input_str: str, available: list[int]) -> list[list[int]]:
             )
         seen.update(range(lo, hi + 1))
 
-        part_eps = sorted(ep for ep in range(lo, hi + 1) if ep in available_set)
-        if not part_eps:
+        part_numbers = sorted(ep for ep in range(lo, hi + 1) if ep in available_numbers)
+        if not part_numbers:
             raise ValueError(f"Range {lo}-{hi} contains no episodes found in folder")
-        parts.append(part_eps)
+        parts.append([(season, episode) for episode in part_numbers])
 
     return parts
 
 
 def build_split_include_patterns(
-    episodes: list[tuple[int, str]], part_episodes: list[int]
+    episodes: list[tuple[EpisodeKey, str]], part_episodes: list[EpisodeKey]
 ) -> list[str]:
     """Build ``--include`` glob patterns that select exactly *part_episodes*.
 
     Uses the ``S##E##`` tag extracted from each filename so the pattern is
     precise (e.g. ``*S01E03*`` rather than a bare ``*E03*``).
     """
-    # Build lookup: ep_num -> first matching filename
-    ep_map: dict[int, str] = {}
-    for ep_num, fname in episodes:
-        if ep_num not in ep_map:
-            ep_map[ep_num] = fname
+    episode_keys_by_filename: dict[str, set[EpisodeKey]] = {}
+    for episode_key, filename in episodes:
+        episode_keys_by_filename.setdefault(filename, set()).add(episode_key)
 
+    selected = set(part_episodes)
     patterns: list[str] = []
-    for ep in sorted(part_episodes):
-        ep_fname = ep_map.get(ep)
-        if ep_fname is None:
+    for filename, file_episode_keys in sorted(
+        episode_keys_by_filename.items(),
+        key=lambda item: (min(item[1]), item[0].casefold()),
+    ):
+        selected_file_keys = selected & file_episode_keys
+        if not selected_file_keys:
             continue
-        m = _EPISODE_RE.search(ep_fname)
-        if m:
-            # e.g. "*S01E03*"
-            patterns.append(f"*{m.group(0)}*")
+        if selected_file_keys != file_episode_keys:
+            formatted = format_episode_ranges(sorted(file_episode_keys))
+            raise ValueError(
+                f"Multi-episode file '{filename}' ({formatted}) must remain in one split part"
+            )
+        match = _EPISODE_RE.search(filename)
+        if match:
+            pattern = f"*{match.group(0)}*"
+            if pattern not in patterns:
+                patterns.append(pattern)
     return patterns
 
 
@@ -1173,7 +1321,7 @@ def split_output_name(folder_name: str, part_index: int) -> str:
 
 def render_split_summary(
     folder_name: str,
-    parts: list[list[int]],
+    parts: list[list[EpisodeKey]],
     include_patterns: list[list[str]],
     output_dir: str,
 ) -> None:
@@ -1291,7 +1439,7 @@ def build_batch_job_create_command(
                 cmd += ["--web-seed", seed_text]
 
     if isinstance(job.get("private"), bool):
-        _append_bool_flag(cmd, "--private", value=job["private"])
+        cmd.append(f"--private={str(job['private']).lower()}")
 
     if isinstance(job.get("no_date"), bool):
         _append_bool_flag(cmd, "--no-date", value=job["no_date"])
@@ -1413,13 +1561,41 @@ def docker_run_base(
 # ----------------------------
 
 
-def maybe_fix_torrent_permissions(cfg: AppCfg) -> None:
-    if not cfg.chown:
-        return
+def _host_torrent_output_path(cfg: AppCfg, path: str) -> str:
+    if _is_under_root(path, cfg.paths.container_output_dir):
+        return map_torrent_path(cfg, "native", path)
+    if _is_under_root(path, cfg.paths.container_data_root):
+        return map_content_path(cfg, "native", path)
+    return os.path.abspath(path)
 
-    outdir = cfg.paths.host_output_dir
-    if not os.path.isdir(outdir):
-        console.print(f"[warn]⚠ Output dir does not exist:[/] {outdir}")
+
+def _snapshot_torrent_outputs(output_dir: str) -> dict[str, tuple[int, int, int]]:
+    snapshot: dict[str, tuple[int, int, int]] = {}
+    if not os.path.isdir(output_dir):
+        return snapshot
+
+    for dirpath, _, files in os.walk(output_dir):
+        for filename in files:
+            if not filename.lower().endswith(".torrent"):
+                continue
+            path = os.path.join(dirpath, filename)
+            try:
+                stat = os.stat(path)
+            except (FileNotFoundError, PermissionError):
+                continue
+            snapshot[path] = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    return snapshot
+
+
+def _changed_torrent_outputs(
+    before: dict[str, tuple[int, int, int]],
+    after: dict[str, tuple[int, int, int]],
+) -> list[str]:
+    return [path for path, metadata in after.items() if before.get(path) != metadata]
+
+
+def maybe_fix_torrent_permissions(cfg: AppCfg, torrent_paths: list[str]) -> None:
+    if not cfg.chown or not torrent_paths:
         return
 
     # Only try chown as root (Unraid root: yes; Ubuntu user: maybe no)
@@ -1430,20 +1606,18 @@ def maybe_fix_torrent_permissions(cfg: AppCfg) -> None:
     uid, gid = cfg.ownership.uid, cfg.ownership.gid
     changed = 0
 
-    for dirpath, _, files in os.walk(outdir):
-        for f in files:
-            if not f.lower().endswith(".torrent"):
-                continue
-            p = os.path.join(dirpath, f)
-            try:
-                st = os.stat(p)
-                if st.st_uid != uid or st.st_gid != gid:
-                    os.chown(p, uid, gid)
-                    changed += 1
-            except FileNotFoundError:
-                continue
-            except PermissionError as e:
-                console.print(f"[warn]⚠ Permission error on {p}: {e}[/]")
+    for path in dict.fromkeys(os.path.abspath(path) for path in torrent_paths):
+        if not path.lower().endswith(".torrent"):
+            continue
+        try:
+            stat = os.stat(path)
+            if stat.st_uid != uid or stat.st_gid != gid:
+                os.chown(path, uid, gid)
+                changed += 1
+        except FileNotFoundError:
+            continue
+        except PermissionError as e:
+            console.print(f"[warn]⚠ Permission error on {path}: {e}[/]")
 
     if changed:
         console.print(f"[ok]✅ chown fixed ownership on {changed} .torrent file(s).[/]")
@@ -1635,6 +1809,25 @@ def validate_batch_payload(payload: dict[str, Any], schema: dict[str, Any]) -> l
     for err in errors:
         path = _error_path(list(err.absolute_path))
         msgs.append(f"{path}: {err.message}")
+
+    jobs = payload.get("jobs")
+    if isinstance(jobs, list):
+        output_jobs: dict[str, int] = {}
+        for idx, raw_job in enumerate(jobs):
+            if not isinstance(raw_job, dict):
+                continue
+            output = raw_job.get("output")
+            if not isinstance(output, str) or not output.strip():
+                continue
+            normalized_output = os.path.normpath(output.strip())
+            first_idx = output_jobs.get(normalized_output)
+            if first_idx is not None:
+                msgs.append(
+                    f"jobs.{idx}.output: duplicates jobs.{first_idx}.output "
+                    f"after path resolution: {normalized_output}"
+                )
+            else:
+                output_jobs[normalized_output] = idx
     return msgs
 
 
@@ -1739,9 +1932,9 @@ def _collect_job_optional_settings(
         result["private"] = private
 
     piece_length = ask_optional_int_range(
-        "Piece length exponent [14-24] (blank to skip)",
-        14,
-        24,
+        "Piece length exponent [16-27] (blank to skip)",
+        16,
+        27,
         default=piece_length_default,
     )
     if piece_length is not None:
@@ -1841,10 +2034,6 @@ def collect_batch_jobs_interactive(cfg: AppCfg) -> dict[str, Any]:
     return collect_batch_jobs_interactive_simple(cfg)
 
 
-def _is_under_root(path: str, root: str) -> bool:
-    return path == root or path.startswith(root + "/")
-
-
 def map_batch_job_paths(cfg: AppCfg, runtime: str, payload: dict[str, Any]) -> dict[str, Any]:
     mapped = deepcopy(payload)
     jobs = mapped.get("jobs")
@@ -1861,34 +2050,17 @@ def map_batch_job_paths(cfg: AppCfg, runtime: str, payload: dict[str, Any]) -> d
         if original_path:
             mapped_path, _ = resolve_unraid_content_path(cfg, runtime, original_path)
         job["path"] = mapped_path
-        if (
-            runtime == "docker"
-            and original_path
-            and mapped_path == original_path
-            and not _is_under_root(original_path, cfg.paths.container_data_root)
-        ):
-            console.print(f"[warn]⚠ Job {idx} path was not remapped for docker: {original_path}[/]")
 
         original_output = str(job.get("output", "")).strip()
         mapped_output = original_output
         if original_output:
-            mapped_output = map_torrent_path(cfg, runtime, original_output)
-            if mapped_output == original_output:
-                content_fallback = map_content_path(cfg, runtime, original_output)
-                if content_fallback != original_output:
-                    mapped_output = content_fallback
-        job["output"] = mapped_output
-
-        if (
-            runtime == "docker"
-            and original_output
-            and mapped_output == original_output
-            and not _is_under_root(original_output, cfg.paths.container_output_dir)
-            and not _is_under_root(original_output, cfg.paths.container_data_root)
-        ):
-            console.print(
-                f"[warn]⚠ Job {idx} output was not remapped for docker: {original_output}[/]"
+            mapped_output = resolve_mounted_torrent_path(
+                cfg,
+                runtime,
+                original_output,
+                context=f"Batch job {idx} output path",
             )
+        job["output"] = mapped_output
 
     return mapped
 
@@ -2324,6 +2496,11 @@ def main() -> None:
     mkbrr_version = "unknown"
     if sys.stdin.isatty():
         mkbrr_version = detect_mkbrr_version(cfg, runtime)
+        try:
+            verify_mkbrr_compatibility(mkbrr_version)
+        except RuntimeError as e:
+            console.print(f"[err]❌ {e}[/]")
+            raise SystemExit(2) from e
 
     render_header(cfg, runtime, mkbrr_version=mkbrr_version)
 
@@ -2337,9 +2514,13 @@ def main() -> None:
             if action == "create":
                 preset = pick_preset(cfg)
                 raw = ask_path("📂 Content path", history=_content_history)
-                content_path, host_data_root_override = resolve_unraid_content_path(
-                    cfg, runtime, raw
-                )
+                try:
+                    content_path, host_data_root_override = resolve_unraid_content_path(
+                        cfg, runtime, raw
+                    )
+                except ValueError as e:
+                    console.print(f"[err]❌ {e}[/]")
+                    continue
 
                 # Check existence for native mode before calling mkbrr
                 if runtime == "native" and not os.path.exists(content_path):
@@ -2372,11 +2553,18 @@ def main() -> None:
                     cfg, runtime, raw, host_data_root_override
                 )
                 episodes = scan_episodes(scan_dir) if os.path.isdir(scan_dir) else []
-                if episodes and len(episodes) >= 2:
-                    ep_nums = [ep for ep, _ in episodes]
+                episode_keys = sorted({episode_key for episode_key, _ in episodes})
+                seasons = {season for season, _ in episode_keys}
+                if len(seasons) > 1:
+                    season_labels = ", ".join(f"S{season:02d}" for season in sorted(seasons))
                     console.print(
-                        f"[info]ℹ Found {len(episodes)} episode(s): "
-                        f"{format_episode_ranges(ep_nums)}[/]"
+                        f"[warn]⚠ Split skipped: found multiple seasons ({season_labels}). "
+                        "Use a separate source folder for each season.[/]"
+                    )
+                elif len(episode_keys) >= 2:
+                    console.print(
+                        f"[info]ℹ Found {len(episode_keys)} episode(s): "
+                        f"{format_episode_ranges(episode_keys)}[/]"
                     )
                     do_split = cast(
                         bool,
@@ -2390,16 +2578,20 @@ def main() -> None:
                                 Prompt.ask("Enter episode ranges [dim](e.g. 1-11, 12-22)[/]"),
                             )
                             try:
-                                parts = parse_split_ranges(range_input, ep_nums)
+                                parts = parse_split_ranges(range_input, episode_keys)
                                 break
                             except ValueError as e:
                                 console.print(f"[err]❌ {e}[/]")
 
                         # --- Build include patterns for each part ---
                         all_patterns: list[list[str]] = []
-                        for part_eps in parts:
-                            pats = build_split_include_patterns(episodes, part_eps)
-                            all_patterns.append(pats)
+                        try:
+                            for part_eps in parts:
+                                pats = build_split_include_patterns(episodes, part_eps)
+                                all_patterns.append(pats)
+                        except ValueError as e:
+                            console.print(f"[err]❌ Split plan invalid: {e}[/]")
+                            continue
 
                         output_dir = cfg.paths.host_output_dir
                         folder_name = Path(raw.rstrip("/").rstrip("\\")).name
@@ -2525,7 +2717,12 @@ def main() -> None:
                                 f"[ok]✅ Split series completed with {succeeded}"
                                 f" successful part(s).[/]"
                             )
-                            maybe_fix_torrent_permissions(cfg)
+                            successful_outputs = [
+                                _host_torrent_output_path(cfg, output_path)
+                                for _, _, output_path, code in result_rows
+                                if code == 0
+                            ]
+                            maybe_fix_torrent_permissions(cfg, successful_outputs)
                         else:
                             console.print("[err]❌ Split series failed for all parts.[/]")
 
@@ -2554,36 +2751,13 @@ def main() -> None:
                         _did_split = True
 
                 if not _did_split:
-                    # Build command inline rather than via build_create_command because
-                    # single-create relies on cwd (native) / -w (docker) for output
-                    # placement and intentionally omits --output.  Splitting uses
-                    # build_batch_job_create_command which passes an explicit --output
-                    # path per part to avoid filename collisions.
-                    if runtime == "docker":
-                        cmd = docker_run_base(
-                            cfg,
-                            cfg.paths.container_output_dir,
-                            host_data_root_override=host_data_root_override,
-                        ) + [
-                            "create",
-                            content_path,
-                            "-P",
-                            preset,
-                            "--preset-file",
-                            cfg.presets_yaml_container,
-                        ]
-                        cwd = None
-                    else:
-                        cmd = [
-                            cfg.mkbrr.binary,
-                            "create",
-                            content_path,
-                            "-P",
-                            preset,
-                            "--preset-file",
-                            cfg.presets_yaml_host,
-                        ]
-                        cwd = cfg.paths.host_output_dir
+                    cmd, cwd = build_create_command(
+                        cfg,
+                        runtime,
+                        content_path,
+                        preset,
+                        host_data_root_override=host_data_root_override,
+                    )
 
                     # Auto-tune workers based on storage type
                     host_path = _resolve_host_path_for_detection(
@@ -2608,12 +2782,21 @@ def main() -> None:
                         )
 
                     if confirm_cmd(cmd, cwd=cwd):
+                        outputs_before = (
+                            _snapshot_torrent_outputs(cfg.paths.host_output_dir)
+                            if cfg.chown
+                            else {}
+                        )
                         t0 = time.monotonic()
                         r = subprocess.run(cmd, cwd=cwd, check=False)
                         elapsed = time.monotonic() - t0
                         if r.returncode == 0:
                             console.print("[ok]✅ mkbrr create finished.[/]")
-                            maybe_fix_torrent_permissions(cfg)
+                            outputs_after = _snapshot_torrent_outputs(cfg.paths.host_output_dir)
+                            maybe_fix_torrent_permissions(
+                                cfg,
+                                _changed_torrent_outputs(outputs_before, outputs_after),
+                            )
                         else:
                             console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
                         notifier.notify(
@@ -2637,7 +2820,11 @@ def main() -> None:
                 else:
                     console.print("[info]Using advanced mode (per-job optional fields).[/]")
                 payload = collect_batch_jobs_interactive(cfg)
-                payload = map_batch_job_paths(cfg, runtime, payload)
+                try:
+                    payload = map_batch_job_paths(cfg, runtime, payload)
+                except ValueError as e:
+                    console.print(f"[err]❌ {e}[/]")
+                    continue
 
                 try:
                     schema = load_batch_schema()
@@ -2792,7 +2979,12 @@ def main() -> None:
                     console.print(
                         f"[ok]✅ mkbrr batch create completed with {succeeded} successful job(s).[/]"
                     )
-                    maybe_fix_torrent_permissions(cfg)
+                    successful_outputs = [
+                        _host_torrent_output_path(cfg, output_path)
+                        for _, _, output_path, code in batch_result_rows
+                        if code == 0
+                    ]
+                    maybe_fix_torrent_permissions(cfg, successful_outputs)
                 else:
                     console.print("[err]❌ mkbrr batch create failed for all jobs.[/]")
 
@@ -2817,19 +3009,18 @@ def main() -> None:
 
             elif action == "inspect":
                 raw = ask_path("📄 Torrent file path", history=_torrent_history)
-                torrent_path = map_torrent_path(cfg, runtime, raw)
+                try:
+                    torrent_path = resolve_mounted_torrent_path(
+                        cfg,
+                        runtime,
+                        raw,
+                        context="Inspect torrent path",
+                    )
+                except ValueError as e:
+                    console.print(f"[err]❌ {e}[/]")
+                    continue
                 verbose = ask_verbose("inspect")
-
-                if runtime == "docker":
-                    cmd = docker_run_base(cfg, cfg.paths.container_config_dir) + [
-                        "inspect",
-                        torrent_path,
-                    ]
-                else:
-                    cmd = [cfg.mkbrr.binary, "inspect", torrent_path]
-
-                if verbose:
-                    cmd.append("-v")
+                cmd = build_inspect_command(cfg, runtime, torrent_path, verbose=verbose)
 
                 if confirm_cmd(cmd):
                     t0 = time.monotonic()
@@ -2856,8 +3047,33 @@ def main() -> None:
                 raw_t = ask_path("📄 Torrent file path", history=_torrent_history)
                 raw_c = ask_path("📂 Content path to verify", history=_content_history)
 
-                torrent_path = map_torrent_path(cfg, runtime, raw_t)
+                try:
+                    torrent_path = resolve_mounted_torrent_path(
+                        cfg,
+                        runtime,
+                        raw_t,
+                        context="Check torrent path",
+                    )
+                except ValueError as e:
+                    console.print(f"[err]❌ {e}[/]")
+                    continue
                 content_path = map_content_path(cfg, runtime, raw_c)
+                if runtime == "docker":
+                    try:
+                        _require_mapped_docker_path(
+                            content_path,
+                            context="Check content path",
+                            configured_roots=(
+                                (
+                                    "paths.host_data_root",
+                                    cfg.paths.host_data_root,
+                                    cfg.paths.container_data_root,
+                                ),
+                            ),
+                        )
+                    except ValueError as e:
+                        console.print(f"[err]❌ {e}[/]")
+                        continue
 
                 # Validate paths before running mkbrr
                 if runtime == "native":
@@ -2896,21 +3112,15 @@ def main() -> None:
                     console.print("[warn]⚠ Both verbose and quiet selected; preferring quiet.[/]")
                     verbose = False
 
-                if runtime == "docker":
-                    cmd = docker_run_base(cfg, cfg.paths.container_config_dir) + [
-                        "check",
-                        torrent_path,
-                        content_path,
-                    ]
-                else:
-                    cmd = [cfg.mkbrr.binary, "check", torrent_path, content_path]
-
-                if verbose:
-                    cmd.append("-v")
-                if quiet:
-                    cmd.append("--quiet")
-                if workers:
-                    cmd += ["--workers", str(workers)]
+                cmd = build_check_command(
+                    cfg,
+                    runtime,
+                    torrent_path,
+                    content_path,
+                    verbose=verbose,
+                    quiet=quiet,
+                    workers=workers,
+                )
 
                 if confirm_cmd(cmd):
                     t0 = time.monotonic()

@@ -41,7 +41,7 @@ def test_maybe_fix_torrent_permissions_skips_when_not_root(
 
     monkeypatch.setattr(os, "chown", fake_chown)
 
-    mkbrr_wizard.maybe_fix_torrent_permissions(cfg)
+    mkbrr_wizard.maybe_fix_torrent_permissions(cfg, [])
     assert called["count"] == 0
 
 
@@ -68,10 +68,13 @@ def test_maybe_fix_torrent_permissions_executes_chown(
         presets_yaml_container="/root/.config/mkbrr/presets.yaml",
     )
 
-    # Create a fake .torrent file
+    # Create one operation output and one unrelated existing torrent.
     p = os.path.join(cfg.paths.host_output_dir, "test.torrent")
     with open(p, "w") as fh:
         fh.write("fake")
+    unrelated = os.path.join(cfg.paths.host_output_dir, "unrelated.torrent")
+    with open(unrelated, "w") as fh:
+        fh.write("existing")
 
     # file has different uid/gid; ensure we run chown path
     monkeypatch.setattr(os, "geteuid", lambda: 0)
@@ -83,7 +86,7 @@ def test_maybe_fix_torrent_permissions_executes_chown(
 
     orig_stat = os.stat
 
-    def fake_stat(fd):
+    def fake_stat(fd, *args, **kwargs):
         # Only return the fake Stat for our .torrent file
         if str(fd).endswith("test.torrent"):
             s = Stat()
@@ -100,9 +103,8 @@ def test_maybe_fix_torrent_permissions_executes_chown(
 
     monkeypatch.setattr(os, "chown", fake_chown)
 
-    mkbrr_wizard.maybe_fix_torrent_permissions(cfg)
-    # chown should have been invoked once
-    assert called["count"] >= 1
+    mkbrr_wizard.maybe_fix_torrent_permissions(cfg, [p])
+    assert called["args"] == [(p, cfg.ownership.uid, cfg.ownership.gid)]
 
     # cleanup
     try:
@@ -110,6 +112,29 @@ def test_maybe_fix_torrent_permissions_executes_chown(
     except Exception:
         pass
     try:
+        os.unlink(unrelated)
+    except Exception:
+        pass
+    try:
         os.rmdir(cfg.paths.host_output_dir)
     except Exception:
         pass
+
+
+def test_changed_torrent_outputs_returns_only_new_or_modified(
+    mkbrr_wizard: ModuleType,
+) -> None:
+    before = {
+        "/out/unchanged.torrent": (1, 100, 10),
+        "/out/modified.torrent": (2, 100, 10),
+    }
+    after = {
+        "/out/unchanged.torrent": (1, 100, 10),
+        "/out/modified.torrent": (2, 200, 20),
+        "/out/new.torrent": (3, 50, 30),
+    }
+
+    assert mkbrr_wizard._changed_torrent_outputs(before, after) == [
+        "/out/modified.torrent",
+        "/out/new.torrent",
+    ]

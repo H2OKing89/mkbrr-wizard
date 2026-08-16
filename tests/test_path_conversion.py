@@ -72,6 +72,16 @@ class TestMapContentPath:
             == "/data/file"
         )
 
+    def test_docker_outside_configured_root_is_rejected_during_planning(
+        self, mkbrr_wizard: ModuleType, sample_cfg: Any
+    ) -> None:
+        with pytest.raises(ValueError, match=r"paths\.host_data_root.*?/mnt/user/data"):
+            mkbrr_wizard.resolve_unraid_content_path(
+                sample_cfg,
+                "docker",
+                "/srv/media/file.mkv",
+            )
+
 
 class TestMapTorrentPath:
     """Tests for map_torrent_path function (config-driven)."""
@@ -123,6 +133,33 @@ class TestMapTorrentPath:
             mkbrr_wizard.map_torrent_path(sample_cfg, "native", "/torrentfiles/test.torrent")
             == "/mnt/user/data/downloads/torrents/torrentfiles/test.torrent"
         )
+
+    def test_docker_torrent_path_can_use_data_mount(
+        self, mkbrr_wizard: ModuleType, sample_cfg: Any
+    ) -> None:
+        assert (
+            mkbrr_wizard.resolve_mounted_torrent_path(
+                sample_cfg,
+                "docker",
+                "/mnt/user/data/torrents/test.torrent",
+                context="Inspect torrent path",
+            )
+            == "/data/torrents/test.torrent"
+        )
+
+    def test_docker_torrent_outside_configured_roots_is_rejected(
+        self, mkbrr_wizard: ModuleType, sample_cfg: Any
+    ) -> None:
+        with pytest.raises(
+            ValueError,
+            match=r"paths\.host_output_dir.*paths\.host_data_root",
+        ):
+            mkbrr_wizard.resolve_mounted_torrent_path(
+                sample_cfg,
+                "docker",
+                "/srv/torrents/test.torrent",
+                context="Inspect torrent path",
+            )
 
 
 class TestExpandPath:

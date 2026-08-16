@@ -3,6 +3,8 @@
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+import pytest  # type: ignore[import-untyped]
+
 from .conftest import _Seq
 
 
@@ -46,7 +48,47 @@ presets_yaml: {cfg_dir}/presets.yaml
     # Confirm.ask: should only be called for 'Do another operation?' -> False
     monkeypatch.setattr(mkbrr_wizard.Confirm, "ask", lambda *a, **k: False)
 
-    import pytest
+    with pytest.raises(SystemExit):
+        mkbrr_wizard.main()
+
+
+def test_main_create_rejects_content_outside_docker_mount_before_execution(
+    tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
+) -> None:
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        f"""
+runtime: docker
+docker_support: true
+chown: false
+mkbrr:
+  binary: mkbrr
+paths:
+  host_data_root: {tmp_path}/data
+  container_data_root: /data
+  host_output_dir: {tmp_path}/torrents
+  container_output_dir: /torrentfiles
+  host_config_dir: {cfg_dir}
+  container_config_dir: /root/.config/mkbrr
+presets_yaml: {cfg_dir}/presets.yaml
+"""
+    )
+
+    monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
+    monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "docker")
+    monkeypatch.setattr(mkbrr_wizard, "_has_prompt_toolkit", False)
+    monkeypatch.setattr(
+        mkbrr_wizard.Prompt,
+        "ask",
+        _Seq(["1", "1", str(tmp_path / "outside" / "movie.mkv"), "q"]),
+    )
+
+    def fail_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("subprocess.run should not be called for an unmapped Docker path")
+
+    monkeypatch.setattr(mkbrr_wizard.subprocess, "run", fail_run)
 
     with pytest.raises(SystemExit):
         mkbrr_wizard.main()
@@ -87,8 +129,6 @@ presets_yaml: {cfg_dir}/presets.yaml
 
     # Confirm.ask: do another -> False
     monkeypatch.setattr(mkbrr_wizard.Confirm, "ask", lambda *a, **k: False)
-
-    import pytest
 
     with pytest.raises(SystemExit):
         mkbrr_wizard.main()

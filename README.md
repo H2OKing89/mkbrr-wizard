@@ -16,7 +16,7 @@ An interactive command-line wizard for working with [mkbrr](https://mkbrr.com) v
 
 - Python 3.10+
 - Docker
-- [mkbrr Docker image](https://mkbrr.com/installation#docker) (`ghcr.io/autobrr/mkbrr`)
+- [mkbrr Docker image](https://mkbrr.com/installation#docker) (`ghcr.io/autobrr/mkbrr:v1.24.1`)
 - Python runtime dependencies: see `requirements.txt` (`pip install -r requirements.txt`)
   - PyYAML (required)
   - rich (UI)
@@ -268,7 +268,7 @@ Path: /mnt/user/data/downloads/my-release
 🧩 Using container path inside mkbrr: /data/downloads/my-release
 
 🚀 About to run:
-   docker run --rm -it -w /root/.config/mkbrr -v /mnt/user/data:/data -v /mnt/user/data/downloads/torrents/torrentfiles:/torrentfiles -v /mnt/cache/appdata/mkbrr:/root/.config/mkbrr ghcr.io/autobrr/mkbrr mkbrr create /data/downloads/my-release -P btn --output-dir /torrentfiles
+    docker run --rm -it -w /root/.config/mkbrr -v /mnt/user/data:/data -v /mnt/user/data/downloads/torrents/torrentfiles:/torrentfiles -v /mnt/cache/appdata/mkbrr:/root/.config/mkbrr ghcr.io/autobrr/mkbrr:v1.24.1 mkbrr create /data/downloads/my-release -P btn --output-dir /torrentfiles
 
 Proceed? [Y/n]: y
 

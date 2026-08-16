@@ -6,6 +6,8 @@ import sys
 from types import ModuleType
 from typing import Any
 
+import pytest  # type: ignore[import-untyped]
+
 
 def test_prompt_toolkit_eof(monkeypatch: Any, mkbrr_wizard: ModuleType) -> None:
     # enable prompt_toolkit branch
@@ -104,7 +106,7 @@ def test_maybe_fix_torrent_permissions_permission_error(
 
     orig_stat = os.stat
 
-    def fake_stat(path):
+    def fake_stat(path, *args, **kwargs):
         if str(path).endswith(".torrent"):
             return Stat()
         return orig_stat(path)
@@ -117,7 +119,7 @@ def test_maybe_fix_torrent_permissions_permission_error(
     monkeypatch.setattr(os, "chown", fake_chown)
 
     # Should catch PermissionError and not raise
-    mkbrr_wizard.maybe_fix_torrent_permissions(cfg)
+    mkbrr_wizard.maybe_fix_torrent_permissions(cfg, [p])
 
 
 def test_ask_verbose_and_quiet(monkeypatch: Any, mkbrr_wizard: ModuleType) -> None:
@@ -284,3 +286,18 @@ def test_detect_mkbrr_version_uses_stderr_when_stdout_empty(
     )
 
     assert mkbrr_wizard.detect_mkbrr_version(cfg, "native") == "3.4.5"
+
+
+@pytest.mark.parametrize("version", ["1.24.0", "1.24.1", "1.99.0"])
+def test_verify_mkbrr_compatibility_accepts_supported_versions(
+    mkbrr_wizard: ModuleType, version: str
+) -> None:
+    mkbrr_wizard.verify_mkbrr_compatibility(version)
+
+
+@pytest.mark.parametrize("version", ["unknown", "1.23.9", "2.0.0", "not-a-version"])
+def test_verify_mkbrr_compatibility_rejects_unverified_versions(
+    mkbrr_wizard: ModuleType, version: str
+) -> None:
+    with pytest.raises(RuntimeError, match="mkbrr"):
+        mkbrr_wizard.verify_mkbrr_compatibility(version)

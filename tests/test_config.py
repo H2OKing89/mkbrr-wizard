@@ -38,7 +38,7 @@ chown: false
             assert cfg.chown is False
             # Defaults
             assert cfg.mkbrr.binary == "mkbrr"
-            assert cfg.mkbrr.image == "ghcr.io/autobrr/mkbrr"
+            assert cfg.mkbrr.image == "ghcr.io/autobrr/mkbrr:v1.24.1"
             assert cfg.ownership.uid == 99
             assert cfg.ownership.gid == 100
             assert cfg.unraid.enabled is False

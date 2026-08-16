@@ -39,7 +39,8 @@ theapp:
 
 mkbrr:
   binary: mkbrr
-  image: ghcr.io/autobrr/mkbrr
+  # Tested release; update only after validating the wizard against a newer mkbrr version.
+  image: ghcr.io/autobrr/mkbrr:v1.24.1
 
 paths:
   host_data_root: /mnt/user/data
