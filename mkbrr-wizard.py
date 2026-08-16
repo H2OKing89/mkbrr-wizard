@@ -33,7 +33,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 try:
     from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -526,6 +526,64 @@ class CommandSpec:
 
     def with_args(self, *args: str) -> CommandSpec:
         return CommandSpec(argv=(*self.argv, *args), cwd=self.cwd)
+
+
+class RuntimeBackend(Protocol):
+    runtime: str
+
+    def run(
+        self, command: CommandSpec, *, timeout: int | None = None
+    ) -> subprocess.CompletedProcess[Any]: ...
+
+
+class _SubprocessBackend:
+    def run(
+        self, command: CommandSpec, *, timeout: int | None = None
+    ) -> subprocess.CompletedProcess[Any]:
+        return subprocess.run(command.argv, cwd=command.cwd, check=False, timeout=timeout)
+
+
+class NativeBackend(_SubprocessBackend):
+    runtime = "native"
+
+
+class DockerBackend(_SubprocessBackend):
+    runtime = "docker"
+
+
+def backend_for_runtime(runtime: str) -> RuntimeBackend:
+    if runtime == "native":
+        return NativeBackend()
+    if runtime == "docker":
+        return DockerBackend()
+    raise ValueError(f"Unsupported runtime: {runtime}")
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    returncode: int
+    elapsed: float
+    timed_out: bool = False
+
+
+class CommandExecutor:
+    def __init__(self, backend: RuntimeBackend) -> None:
+        self._backend = backend
+
+    def run(self, command: CommandSpec, *, timeout: int | None = None) -> ExecutionResult:
+        started = time.monotonic()
+        try:
+            completed = self._backend.run(command, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return ExecutionResult(
+                returncode=124,
+                elapsed=time.monotonic() - started,
+                timed_out=True,
+            )
+        return ExecutionResult(
+            returncode=completed.returncode,
+            elapsed=time.monotonic() - started,
+        )
 
 
 @dataclass(frozen=True)
@@ -2755,6 +2813,323 @@ def render_header(cfg: AppCfg, runtime: str, mkbrr_version: str = "unknown") -> 
     console.print(Panel(table, title="🧙 Config", border_style="magenta", box=box.ROUNDED))
 
 
+def handle_inspect(
+    cfg: AppCfg,
+    runtime: str,
+    executor: CommandExecutor,
+    notifier: NotificationManager,
+) -> bool:
+    raw = ask_path("📄 Torrent file path", history=_torrent_history)
+    try:
+        torrent_path = resolve_mounted_torrent_path(
+            cfg,
+            runtime,
+            raw,
+            context="Inspect torrent path",
+        )
+    except ValueError as e:
+        console.print(f"[err]❌ {e}[/]")
+        return False
+
+    verbose = ask_verbose("inspect")
+    command_spec = build_inspect_command(cfg, runtime, torrent_path, verbose=verbose)
+    if confirm_cmd(command_spec.argv, cwd=command_spec.cwd):
+        execution = executor.run(command_spec)
+        if execution.returncode == 0:
+            console.print("[ok]✅ done.[/]")
+        else:
+            console.print(f"[err]❌ mkbrr exited with code {execution.returncode}[/]")
+        notifier.notify(
+            NotifyEvent(
+                event_type="inspect",
+                success=execution.returncode == 0,
+                title="Inspect Complete" if execution.returncode == 0 else "Inspect Failed",
+                details={
+                    "path": raw,
+                    "exit_code": execution.returncode,
+                    "elapsed": execution.elapsed,
+                },
+            )
+        )
+    return True
+
+
+def handle_check(
+    cfg: AppCfg,
+    runtime: str,
+    executor: CommandExecutor,
+    notifier: NotificationManager,
+) -> bool:
+    raw_torrent_path = ask_path("📄 Torrent file path", history=_torrent_history)
+    raw_content_path = ask_path("📂 Content path to verify", history=_content_history)
+    try:
+        torrent_path = resolve_mounted_torrent_path(
+            cfg,
+            runtime,
+            raw_torrent_path,
+            context="Check torrent path",
+        )
+    except ValueError as e:
+        console.print(f"[err]❌ {e}[/]")
+        return False
+
+    content_path = map_content_path(cfg, runtime, raw_content_path)
+    if runtime == "docker":
+        try:
+            _require_mapped_docker_path(
+                content_path,
+                context="Check content path",
+                configured_roots=(
+                    (
+                        "paths.host_data_root",
+                        cfg.paths.host_data_root,
+                        cfg.paths.container_data_root,
+                    ),
+                ),
+            )
+        except ValueError as e:
+            console.print(f"[err]❌ {e}[/]")
+            return False
+
+    if runtime == "native":
+        if not os.path.isfile(torrent_path):
+            console.print(f"[err]❌ Torrent file not found:[/] {torrent_path}")
+            return False
+        if not os.path.exists(content_path):
+            console.print(f"[err]❌ Content path not found:[/] {content_path}")
+            return False
+
+    verbose = ask_verbose("check")
+    quiet = ask_quiet()
+    workers = ask_workers()
+    if workers is None:
+        check_host_path = _resolve_host_path_for_detection(cfg, runtime, raw_content_path, None)
+        check_storage = detect_storage_type(
+            check_host_path,
+            fuse_root=cfg.unraid.fuse_root,
+            mount_priority=cfg.unraid.mount_priority,
+        )
+        workers = resolve_workers(check_storage, cfg.workers)
+        if workers is not None:
+            console.print(
+                f"[info]ℹ Storage detected as {check_storage.upper()} → --workers {workers}[/]"
+            )
+        else:
+            console.print(f"[info]ℹ Storage detected as {check_storage.upper()} → workers auto[/]")
+
+    if quiet and verbose:
+        console.print("[warn]⚠ Both verbose and quiet selected; preferring quiet.[/]")
+        verbose = False
+
+    command_spec = build_check_command(
+        cfg,
+        runtime,
+        torrent_path,
+        content_path,
+        verbose=verbose,
+        quiet=quiet,
+        workers=workers,
+    )
+    if confirm_cmd(command_spec.argv, cwd=command_spec.cwd):
+        execution = executor.run(command_spec)
+        if execution.returncode == 0:
+            console.print("[ok]✅ data verified.[/]")
+        else:
+            console.print(f"[err]❌ mkbrr exited with code {execution.returncode}[/]")
+        notifier.notify(
+            NotifyEvent(
+                event_type="check",
+                success=execution.returncode == 0,
+                title="Data Verified" if execution.returncode == 0 else "Check Failed",
+                details={
+                    "path": raw_torrent_path,
+                    "exit_code": execution.returncode,
+                    "elapsed": execution.elapsed,
+                },
+            )
+        )
+    return True
+
+
+def handle_batch(
+    cfg: AppCfg,
+    runtime: str,
+    executor: CommandExecutor,
+    notifier: NotificationManager,
+) -> bool:
+    preset = pick_preset(cfg)
+    console.print(
+        "[info]Using simple mode (preset-driven).[/]"
+        if cfg.batch.mode == "simple"
+        else "[info]Using advanced mode (per-job optional fields).[/]"
+    )
+    payload = collect_batch_jobs_interactive(cfg)
+    try:
+        payload = map_batch_job_paths(cfg, runtime, payload)
+        schema = load_batch_schema()
+    except (FileNotFoundError, ValueError) as e:
+        console.print(f"[err]❌ {e}[/]")
+        return False
+
+    validation_errors = validate_batch_payload(payload, schema)
+    if validation_errors:
+        console.print("[err]❌ Batch config failed schema validation:[/]")
+        for error in validation_errors:
+            console.print(f"[err]  - {error}[/]")
+        return False
+
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, list) or not jobs:
+        console.print("[err]❌ No valid jobs found after validation.[/]")
+        return False
+    try:
+        typed_jobs: list[BatchJob] = []
+        for index, job in enumerate(jobs, 1):
+            if not isinstance(job, Mapping):
+                raise ValueError(f"Batch job {index} must be a mapping")
+            typed_jobs.append(BatchJob.from_mapping(job))
+    except ValueError as e:
+        console.print(f"[err]❌ Invalid batch job: {e}[/]")
+        return False
+    if not typed_jobs:
+        console.print("[err]❌ No valid job objects found after validation.[/]")
+        return False
+
+    render_batch_summary(payload)
+    try:
+        preview_override = None
+        if runtime == "docker":
+            preview_override = resolve_unraid_content_path(cfg, runtime, typed_jobs[0].path)[1]
+        preview_spec = build_batch_job_create_command(
+            cfg,
+            runtime,
+            preset,
+            typed_jobs[0],
+            host_data_root_override=preview_override,
+        )
+    except ValueError as e:
+        console.print(f"[err]❌ Invalid batch job: {e}[/]")
+        return False
+    console.print(
+        f"[info]About to run {len(typed_jobs)} batch job(s). Showing first job command preview.[/]"
+    )
+    if not confirm_cmd(preview_spec.argv, cwd=preview_spec.cwd):
+        return False
+
+    succeeded = 0
+    failed = 0
+    results: list[JobResult] = []
+    started = time.monotonic()
+    for index, job in enumerate(typed_jobs, 1):
+        job_override = None
+        if runtime == "docker":
+            job_override = resolve_unraid_content_path(cfg, runtime, job.path)[1]
+        try:
+            preflight_unraid_split_share(
+                cfg,
+                runtime=runtime,
+                content_path=job.path,
+                host_data_root_override=job_override,
+                context=f"batch job {index}",
+            )
+        except ValueError as e:
+            failed += 1
+            results.append(JobResult(index, job.path, job.output, 2))
+            console.print(f"[err]❌ Job {index} preflight failed: {e}[/]")
+            continue
+
+        try:
+            command_spec = build_batch_job_create_command(
+                cfg,
+                runtime,
+                preset,
+                job,
+                host_data_root_override=job_override,
+            )
+        except ValueError as e:
+            failed += 1
+            results.append(JobResult(index, job.path, job.output, 2))
+            console.print(f"[err]❌ Job {index} invalid: {e}[/]")
+            continue
+
+        job_host_path = _resolve_host_path_for_detection(cfg, runtime, job.path, job_override)
+        job_storage = detect_storage_type(
+            job_host_path,
+            fuse_root=cfg.unraid.fuse_root,
+            mount_priority=cfg.unraid.mount_priority,
+        )
+        job_workers = resolve_workers(job_storage, cfg.workers)
+        if job_workers is not None:
+            command_spec = command_spec.with_args("--workers", str(job_workers))
+
+        execution = executor.run(command_spec, timeout=cfg.batch.job_timeout_seconds)
+        results.append(JobResult(index, job.path, job.output, execution.returncode))
+        if execution.timed_out:
+            failed += 1
+            timeout_msg = (
+                f" after {cfg.batch.job_timeout_seconds}s"
+                if cfg.batch.job_timeout_seconds is not None
+                else ""
+            )
+            console.print(f"[err]❌ Job {index} timed out{timeout_msg}[/]")
+        elif execution.returncode == 0:
+            succeeded += 1
+        else:
+            failed += 1
+            console.print(f"[err]❌ Job {index} failed with exit code {execution.returncode}[/]")
+
+    results_table = Table(
+        title=f"Batch Results (success={succeeded}, failed={failed})",
+        box=box.SIMPLE,
+        show_lines=False,
+    )
+    results_table.add_column("#", style="cyan", justify="right")
+    results_table.add_column("Path", style="path")
+    results_table.add_column("Output", style="path")
+    results_table.add_column("Code", justify="right")
+    for result in results:
+        style = "ok" if result.succeeded else "err"
+        results_table.add_row(
+            str(result.index),
+            result.content_path,
+            result.output_path,
+            f"[{style}]{result.exit_code}[/]",
+        )
+    console.print(results_table)
+
+    if succeeded > 0:
+        console.print(f"[ok]✅ mkbrr batch create completed with {succeeded} successful job(s).[/]")
+        maybe_fix_torrent_permissions(
+            cfg,
+            [
+                _host_torrent_output_path(cfg, result.output_path)
+                for result in results
+                if result.succeeded
+            ],
+        )
+    else:
+        console.print("[err]❌ mkbrr batch create failed for all jobs.[/]")
+
+    notifier.notify(
+        NotifyEvent(
+            event_type="batch",
+            success=failed == 0,
+            title=(
+                "Batch Complete"
+                if failed == 0
+                else "Batch Failed" if succeeded == 0 else "Batch Partial"
+            ),
+            details={
+                "succeeded": succeeded,
+                "failed": failed,
+                "result_rows": [result.as_tuple() for result in results],
+                "elapsed": time.monotonic() - started,
+            },
+        )
+    )
+    return True
+
+
 def main() -> None:
     args = parse_args()
     cfg = load_config(Path(args.config))
@@ -2774,6 +3149,7 @@ def main() -> None:
     render_header(cfg, runtime, mkbrr_version=mkbrr_version)
 
     notifier = NotificationManager(cfg.notifications)
+    executor = CommandExecutor(backend_for_runtime(runtime))
 
     try:
         while True:
@@ -2941,26 +3317,24 @@ def main() -> None:
                             if job_workers is not None:
                                 command_spec = command_spec.with_args("--workers", str(job_workers))
 
-                            try:
-                                r = subprocess.run(
-                                    command_spec.argv,
-                                    cwd=command_spec.cwd,
-                                    check=False,
-                                    timeout=cfg.batch.job_timeout_seconds,
-                                )
-                                results.append(JobResult(idx, job.path, job.output, r.returncode))
-                                if r.returncode == 0:
-                                    succeeded += 1
-                                else:
-                                    failed += 1
-                                    console.print(
-                                        f"[err]❌ Part {idx} failed with exit code"
-                                        f" {r.returncode}[/]"
-                                    )
-                            except subprocess.TimeoutExpired:
+                            execution = executor.run(
+                                command_spec,
+                                timeout=cfg.batch.job_timeout_seconds,
+                            )
+                            results.append(
+                                JobResult(idx, job.path, job.output, execution.returncode)
+                            )
+                            if execution.timed_out:
                                 failed += 1
-                                results.append(JobResult(idx, job.path, job.output, 124))
                                 console.print(f"[err]❌ Part {idx} timed out[/]")
+                            elif execution.returncode == 0:
+                                succeeded += 1
+                            else:
+                                failed += 1
+                                console.print(
+                                    f"[err]❌ Part {idx} failed with exit code"
+                                    f" {execution.returncode}[/]"
+                                )
 
                         # --- Results table ---
                         results_table = Table(
@@ -3059,14 +3433,8 @@ def main() -> None:
                             if cfg.chown
                             else {}
                         )
-                        t0 = time.monotonic()
-                        r = subprocess.run(
-                            command_spec.argv,
-                            cwd=command_spec.cwd,
-                            check=False,
-                        )
-                        elapsed = time.monotonic() - t0
-                        if r.returncode == 0:
+                        execution = executor.run(command_spec)
+                        if execution.returncode == 0:
                             console.print("[ok]✅ mkbrr create finished.[/]")
                             outputs_after = _snapshot_torrent_outputs(cfg.paths.host_output_dir)
                             maybe_fix_torrent_permissions(
@@ -3074,366 +3442,38 @@ def main() -> None:
                                 _changed_torrent_outputs(outputs_before, outputs_after),
                             )
                         else:
-                            console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
+                            console.print(
+                                f"[err]❌ mkbrr exited with code {execution.returncode}[/]"
+                            )
                         notifier.notify(
                             NotifyEvent(
                                 event_type="create",
-                                success=r.returncode == 0,
-                                title=("Torrent Created" if r.returncode == 0 else "Create Failed"),
+                                success=execution.returncode == 0,
+                                title=(
+                                    "Torrent Created"
+                                    if execution.returncode == 0
+                                    else "Create Failed"
+                                ),
                                 details={
                                     "path": raw,
                                     "preset": preset,
-                                    "exit_code": r.returncode,
-                                    "elapsed": elapsed,
+                                    "exit_code": execution.returncode,
+                                    "elapsed": execution.elapsed,
                                 },
                             )
                         )
 
             elif action == "batch":
-                preset = pick_preset(cfg)
-                if cfg.batch.mode == "simple":
-                    console.print("[info]Using simple mode (preset-driven).[/]")
-                else:
-                    console.print("[info]Using advanced mode (per-job optional fields).[/]")
-                payload = collect_batch_jobs_interactive(cfg)
-                try:
-                    payload = map_batch_job_paths(cfg, runtime, payload)
-                except ValueError as e:
-                    console.print(f"[err]❌ {e}[/]")
+                if not handle_batch(cfg, runtime, executor, notifier):
                     continue
-
-                try:
-                    schema = load_batch_schema()
-                except (FileNotFoundError, ValueError) as e:
-                    console.print(f"[err]❌ {e}[/]")
-                    continue
-
-                validation_errors = validate_batch_payload(payload, schema)
-                if validation_errors:
-                    console.print("[err]❌ Batch config failed schema validation:[/]")
-                    for err in validation_errors:
-                        console.print(f"[err]  - {err}[/]")
-                    continue
-
-                jobs = payload.get("jobs")
-                if not isinstance(jobs, list) or not jobs:
-                    console.print("[err]❌ No valid jobs found after validation.[/]")
-                    continue
-
-                try:
-                    typed_jobs: list[BatchJob] = []
-                    for index, job in enumerate(jobs, 1):
-                        if not isinstance(job, Mapping):
-                            raise ValueError(f"Batch job {index} must be a mapping")
-                        typed_jobs.append(BatchJob.from_mapping(job))
-                except ValueError as e:
-                    console.print(f"[err]❌ Invalid batch job: {e}[/]")
-                    continue
-                if not typed_jobs:
-                    console.print("[err]❌ No valid job objects found after validation.[/]")
-                    continue
-
-                render_batch_summary(payload)
-
-                try:
-                    preview_override = None
-                    if runtime == "docker":
-                        preview_override = resolve_unraid_content_path(
-                            cfg, runtime, typed_jobs[0].path
-                        )[1]
-                    preview_spec = build_batch_job_create_command(
-                        cfg,
-                        runtime,
-                        preset,
-                        typed_jobs[0],
-                        host_data_root_override=preview_override,
-                    )
-                except ValueError as e:
-                    console.print(f"[err]❌ Invalid batch job: {e}[/]")
-                    continue
-                console.print(
-                    f"[info]About to run {len(typed_jobs)} batch job(s). Showing first job command preview.[/]"
-                )
-                if not confirm_cmd(preview_spec.argv, cwd=preview_spec.cwd):
-                    continue
-
-                succeeded = 0
-                failed = 0
-                batch_results: list[JobResult] = []
-                batch_t0 = time.monotonic()
-
-                for idx, job in enumerate(typed_jobs, 1):
-                    output_path = job.output
-                    content_path = job.path
-                    job_override = None
-                    if runtime == "docker":
-                        job_override = resolve_unraid_content_path(cfg, runtime, content_path)[1]
-
-                    try:
-                        preflight_unraid_split_share(
-                            cfg,
-                            runtime=runtime,
-                            content_path=content_path,
-                            host_data_root_override=job_override,
-                            context=f"batch job {idx}",
-                        )
-                    except ValueError as e:
-                        failed += 1
-                        batch_results.append(JobResult(idx, content_path, output_path, 2))
-                        console.print(f"[err]❌ Job {idx} preflight failed: {e}[/]")
-                        continue
-
-                    try:
-                        command_spec = build_batch_job_create_command(
-                            cfg,
-                            runtime,
-                            preset,
-                            job,
-                            host_data_root_override=job_override,
-                        )
-                    except ValueError as e:
-                        failed += 1
-                        batch_results.append(JobResult(idx, content_path, output_path, 2))
-                        console.print(f"[err]❌ Job {idx} invalid: {e}[/]")
-                        continue
-
-                    # Auto-tune workers per job based on storage type
-                    job_host_path = _resolve_host_path_for_detection(
-                        cfg, runtime, content_path, job_override
-                    )
-                    job_storage = detect_storage_type(
-                        job_host_path,
-                        fuse_root=cfg.unraid.fuse_root,
-                        mount_priority=cfg.unraid.mount_priority,
-                    )
-                    job_workers = resolve_workers(job_storage, cfg.workers)
-                    if job_workers is not None:
-                        command_spec = command_spec.with_args("--workers", str(job_workers))
-
-                    try:
-                        r = subprocess.run(
-                            command_spec.argv,
-                            cwd=command_spec.cwd,
-                            check=False,
-                            timeout=cfg.batch.job_timeout_seconds,
-                        )
-                        batch_results.append(
-                            JobResult(idx, content_path, output_path, r.returncode)
-                        )
-
-                        if r.returncode == 0:
-                            succeeded += 1
-                        else:
-                            failed += 1
-                            console.print(
-                                f"[err]❌ Job {idx} failed with exit code {r.returncode}[/]"
-                            )
-                    except subprocess.TimeoutExpired:
-                        failed += 1
-                        batch_results.append(JobResult(idx, content_path, output_path, 124))
-                        timeout_msg = (
-                            f" after {cfg.batch.job_timeout_seconds}s"
-                            if cfg.batch.job_timeout_seconds is not None
-                            else ""
-                        )
-                        console.print(f"[err]❌ Job {idx} timed out{timeout_msg}[/]")
-
-                results_table = Table(
-                    title=f"Batch Results (success={succeeded}, failed={failed})",
-                    box=box.SIMPLE,
-                    show_lines=False,
-                )
-                results_table.add_column("#", style="cyan", justify="right")
-                results_table.add_column("Path", style="path")
-                results_table.add_column("Output", style="path")
-                results_table.add_column("Code", justify="right")
-
-                for result in batch_results:
-                    code_style = "ok" if result.succeeded else "err"
-                    results_table.add_row(
-                        str(result.index),
-                        result.content_path,
-                        result.output_path,
-                        f"[{code_style}]{result.exit_code}[/]",
-                    )
-
-                console.print(results_table)
-
-                if succeeded > 0:
-                    console.print(
-                        f"[ok]✅ mkbrr batch create completed with {succeeded} successful job(s).[/]"
-                    )
-                    successful_outputs = [
-                        _host_torrent_output_path(cfg, result.output_path)
-                        for result in batch_results
-                        if result.succeeded
-                    ]
-                    maybe_fix_torrent_permissions(cfg, successful_outputs)
-                else:
-                    console.print("[err]❌ mkbrr batch create failed for all jobs.[/]")
-
-                batch_elapsed = time.monotonic() - batch_t0
-                notifier.notify(
-                    NotifyEvent(
-                        event_type="batch",
-                        success=failed == 0,
-                        title=(
-                            "Batch Complete"
-                            if failed == 0
-                            else "Batch Failed" if succeeded == 0 else "Batch Partial"
-                        ),
-                        details={
-                            "succeeded": succeeded,
-                            "failed": failed,
-                            "result_rows": [result.as_tuple() for result in batch_results],
-                            "elapsed": batch_elapsed,
-                        },
-                    )
-                )
 
             elif action == "inspect":
-                raw = ask_path("📄 Torrent file path", history=_torrent_history)
-                try:
-                    torrent_path = resolve_mounted_torrent_path(
-                        cfg,
-                        runtime,
-                        raw,
-                        context="Inspect torrent path",
-                    )
-                except ValueError as e:
-                    console.print(f"[err]❌ {e}[/]")
+                if not handle_inspect(cfg, runtime, executor, notifier):
                     continue
-                verbose = ask_verbose("inspect")
-                command_spec = build_inspect_command(cfg, runtime, torrent_path, verbose=verbose)
-
-                if confirm_cmd(command_spec.argv, cwd=command_spec.cwd):
-                    t0 = time.monotonic()
-                    r = subprocess.run(
-                        command_spec.argv,
-                        cwd=command_spec.cwd,
-                        check=False,
-                    )
-                    elapsed = time.monotonic() - t0
-                    if r.returncode == 0:
-                        console.print("[ok]✅ done.[/]")
-                    else:
-                        console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
-                    notifier.notify(
-                        NotifyEvent(
-                            event_type="inspect",
-                            success=r.returncode == 0,
-                            title="Inspect Complete" if r.returncode == 0 else "Inspect Failed",
-                            details={
-                                "path": raw,
-                                "exit_code": r.returncode,
-                                "elapsed": elapsed,
-                            },
-                        )
-                    )
 
             elif action == "check":
-                raw_t = ask_path("📄 Torrent file path", history=_torrent_history)
-                raw_c = ask_path("📂 Content path to verify", history=_content_history)
-
-                try:
-                    torrent_path = resolve_mounted_torrent_path(
-                        cfg,
-                        runtime,
-                        raw_t,
-                        context="Check torrent path",
-                    )
-                except ValueError as e:
-                    console.print(f"[err]❌ {e}[/]")
+                if not handle_check(cfg, runtime, executor, notifier):
                     continue
-                content_path = map_content_path(cfg, runtime, raw_c)
-                if runtime == "docker":
-                    try:
-                        _require_mapped_docker_path(
-                            content_path,
-                            context="Check content path",
-                            configured_roots=(
-                                (
-                                    "paths.host_data_root",
-                                    cfg.paths.host_data_root,
-                                    cfg.paths.container_data_root,
-                                ),
-                            ),
-                        )
-                    except ValueError as e:
-                        console.print(f"[err]❌ {e}[/]")
-                        continue
-
-                # Validate paths before running mkbrr
-                if runtime == "native":
-                    if not os.path.isfile(torrent_path):
-                        console.print(f"[err]❌ Torrent file not found:[/] {torrent_path}")
-                        continue
-                    if not os.path.exists(content_path):
-                        console.print(f"[err]❌ Content path not found:[/] {content_path}")
-                        continue
-
-                verbose = ask_verbose("check")
-                quiet = ask_quiet()
-                workers = ask_workers()
-
-                # If user chose auto, apply storage-type detection
-                if workers is None:
-                    check_host_path = _resolve_host_path_for_detection(cfg, runtime, raw_c, None)
-                    check_storage = detect_storage_type(
-                        check_host_path,
-                        fuse_root=cfg.unraid.fuse_root,
-                        mount_priority=cfg.unraid.mount_priority,
-                    )
-                    workers = resolve_workers(check_storage, cfg.workers)
-                    if workers is not None:
-                        console.print(
-                            f"[info]ℹ Storage detected as {check_storage.upper()} "
-                            f"→ --workers {workers}[/]"
-                        )
-                    else:
-                        console.print(
-                            f"[info]ℹ Storage detected as {check_storage.upper()} "
-                            f"→ workers auto[/]"
-                        )
-
-                if quiet and verbose:
-                    console.print("[warn]⚠ Both verbose and quiet selected; preferring quiet.[/]")
-                    verbose = False
-
-                command_spec = build_check_command(
-                    cfg,
-                    runtime,
-                    torrent_path,
-                    content_path,
-                    verbose=verbose,
-                    quiet=quiet,
-                    workers=workers,
-                )
-
-                if confirm_cmd(command_spec.argv, cwd=command_spec.cwd):
-                    t0 = time.monotonic()
-                    r = subprocess.run(
-                        command_spec.argv,
-                        cwd=command_spec.cwd,
-                        check=False,
-                    )
-                    elapsed = time.monotonic() - t0
-                    if r.returncode == 0:
-                        console.print("[ok]✅ data verified.[/]")
-                    else:
-                        console.print(f"[err]❌ mkbrr exited with code {r.returncode}[/]")
-                    notifier.notify(
-                        NotifyEvent(
-                            event_type="check",
-                            success=r.returncode == 0,
-                            title="Data Verified" if r.returncode == 0 else "Check Failed",
-                            details={
-                                "path": raw_t,
-                                "exit_code": r.returncode,
-                                "elapsed": elapsed,
-                            },
-                        )
-                    )
 
             console.rule(style="dim")
             if not Confirm.ask("Do another operation?", default=False):

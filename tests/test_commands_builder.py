@@ -1,6 +1,6 @@
 """Tests for command builder functions and runtime selection."""
 
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest  # type: ignore[import-untyped]
@@ -58,6 +58,61 @@ def test_command_spec_with_args_returns_new_value(mkbrr_wizard: ModuleType) -> N
     assert spec.argv == ("mkbrr", "create")
     assert extended.argv == ("mkbrr", "create", "--workers", "4")
     assert extended.cwd == spec.cwd
+
+
+@pytest.mark.parametrize(
+    ("runtime", "backend_type"),
+    [
+        pytest.param("native", "NativeBackend", id="native"),
+        pytest.param("docker", "DockerBackend", id="docker"),
+    ],
+)
+def test_backend_for_runtime_selects_expected_backend(
+    mkbrr_wizard: ModuleType, runtime: str, backend_type: str
+) -> None:
+    backend = mkbrr_wizard.backend_for_runtime(runtime)
+
+    assert type(backend).__name__ == backend_type
+    assert backend.runtime == runtime
+
+
+def test_command_executor_runs_command_spec(mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:
+    calls: list[tuple[tuple[str, ...], str | None, bool, int | None]] = []
+
+    def fake_run(command, *, cwd, check, timeout):
+        calls.append((command, cwd, check, timeout))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(mkbrr_wizard.subprocess, "run", fake_run)
+    executor = mkbrr_wizard.CommandExecutor(mkbrr_wizard.NativeBackend())
+
+    result = executor.run(
+        mkbrr_wizard.CommandSpec(argv=("mkbrr", "create"), cwd="working-directory"),
+        timeout=45,
+    )
+
+    assert calls == [(("mkbrr", "create"), "working-directory", False, 45)]
+    assert result.returncode == 0
+    assert result.timed_out is False
+    assert result.elapsed >= 0
+
+
+def test_command_executor_maps_timeout_to_exit_code(
+    mkbrr_wizard: ModuleType, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr(
+        mkbrr_wizard.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            mkbrr_wizard.subprocess.TimeoutExpired(cmd=["mkbrr"], timeout=10)
+        ),
+    )
+    executor = mkbrr_wizard.CommandExecutor(mkbrr_wizard.DockerBackend())
+
+    result = executor.run(mkbrr_wizard.CommandSpec(argv=("docker", "run")), timeout=10)
+
+    assert result.returncode == 124
+    assert result.timed_out is True
 
 
 def test_build_inspect_command_verbose(mkbrr_wizard: ModuleType) -> None:

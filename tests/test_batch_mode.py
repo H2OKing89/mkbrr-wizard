@@ -556,6 +556,47 @@ def test_collect_batch_jobs_interactive_advanced_includes_optional(
     }
 
 
+def test_handle_batch_executes_job_notifies_and_fixes_ownership(
+    tmp_path: Path, mkbrr_wizard: ModuleType, monkeypatch: Any
+) -> None:
+    config_yaml, _, _, _, _, content, output = _build_main_batch_test_files(
+        tmp_path, runtime="native", docker_support=False
+    )
+    cfg = mkbrr_wizard.load_config(config_yaml)
+    executed: list[Any] = []
+    notifications: list[Any] = []
+    owned_paths: list[str] = []
+    monkeypatch.setattr(mkbrr_wizard, "pick_preset", lambda cfg: "btn")
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "collect_batch_jobs_interactive",
+        lambda cfg: {
+            "version": 1,
+            "jobs": [{"path": str(content), "output": str(output)}],
+        },
+    )
+    monkeypatch.setattr(mkbrr_wizard, "confirm_cmd", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "maybe_fix_torrent_permissions",
+        lambda cfg, paths: owned_paths.extend(paths),
+    )
+
+    def run(command: Any, *, timeout: int | None = None) -> Any:
+        executed.append((command, timeout))
+        return mkbrr_wizard.ExecutionResult(returncode=0, elapsed=3.5)
+
+    executor = SimpleNamespace(run=run)
+    notifier = SimpleNamespace(notify=notifications.append)
+
+    assert mkbrr_wizard.handle_batch(cfg, "native", executor, notifier) is True
+    assert len(executed) == 1
+    assert executed[0][0].argv[:2] == ("mkbrr", "create")
+    assert owned_paths == [str(output)]
+    assert notifications[0].event_type == "batch"
+    assert notifications[0].details["elapsed"] >= 0
+
+
 def test_main_batch_success_native(tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:
     config_yaml, _, _, _, _, content, output = _build_main_batch_test_files(
         tmp_path, runtime="native", docker_support=False
