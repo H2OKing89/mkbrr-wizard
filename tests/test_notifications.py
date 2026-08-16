@@ -111,7 +111,7 @@ notifications:
     app_token: my_app_token
     user_key: my_user_key
     priority: -1
-    failure_priority: 2
+    failure_priority: 1
     device: myphone
   discord:
     enabled: true
@@ -136,7 +136,7 @@ notifications:
             assert n.pushover.app_token == "my_app_token"
             assert n.pushover.user_key == "my_user_key"
             assert n.pushover.priority == -1
-            assert n.pushover.failure_priority == 2
+            assert n.pushover.failure_priority == 1
             assert n.pushover.device == "myphone"
 
             assert n.discord.enabled is True
@@ -495,11 +495,14 @@ class TestNotificationManagerPolicy:
         # drop it because loop.stop() ran before the coroutine finished.
         event = _make_event(mkbrr_wizard, success=True, title="Final Summary")
         mgr.notify(event)
+        started = time.monotonic()
         mgr.shutdown(timeout=5.0)
+        elapsed = time.monotonic() - started
 
         assert (
             "Final Summary" in call_log
         ), "shutdown() must drain pending notifications before stopping the loop"
+        assert elapsed < 1.5, "shutdown should not wait for its full timeout after draining"
 
     def test_notify_ignores_runtimeerror_when_loop_closing(
         self, mkbrr_wizard: ModuleType, monkeypatch: Any

@@ -276,8 +276,8 @@ def test_build_batch_job_create_command_native_and_docker(
     assert "--output" in native_cmd
     assert "--tracker" in native_cmd
     assert "--private=true" in native_cmd
-    assert "--no-date" not in native_cmd
-    assert "--entropy" in native_cmd
+    assert "--no-date=false" in native_cmd
+    assert "--entropy=true" in native_cmd
     assert native_spec.cwd == cfg.paths.host_output_dir
 
     docker_content = tmp_path / "docker-content.mkv"
@@ -402,6 +402,30 @@ def test_build_batch_job_create_command_emits_explicit_private_value(
     )
 
     assert f"--private={str(private).lower()}" in spec.argv
+
+
+@pytest.mark.parametrize("value", [None, True, False])
+def test_build_batch_job_create_command_emits_optional_boolean_overrides(
+    mkbrr_wizard: ModuleType, tmp_path: Path, value: bool | None
+) -> None:
+    cfg = _sample_cfg(mkbrr_wizard, tmp_path)
+    fields = {
+        "no_date": "--no-date",
+        "entropy": "--entropy",
+        "skip_prefix": "--skip-prefix",
+        "fail_on_season_warning": "--fail-on-season-warning",
+    }
+    job: dict[str, Any] = {
+        "path": str(tmp_path / "content.mkv"),
+        "output": str(tmp_path / "out.torrent"),
+        **dict.fromkeys(fields, value),
+    }
+
+    spec = mkbrr_wizard.build_batch_job_create_command(cfg, "native", "btn", job)
+
+    for flag in fields.values():
+        expected = None if value is None else f"{flag}={str(value).lower()}"
+        assert expected in spec.argv if expected else flag not in spec.argv
 
 
 @pytest.mark.parametrize(
@@ -592,6 +616,7 @@ def test_handle_batch_executes_job_notifies_and_fixes_ownership(
     assert mkbrr_wizard.handle_batch(cfg, "native", executor, notifier) is True
     assert len(executed) == 1
     assert executed[0][0].argv[:2] == ("mkbrr", "create")
+    assert executed[0][1] == cfg.batch.job_timeout_seconds
     assert owned_paths == [str(output)]
     assert notifications[0].event_type == "batch"
     assert notifications[0].details["elapsed"] >= 0
@@ -804,10 +829,8 @@ def test_main_batch_rejects_non_mapping_job_after_schema_validation(
     config_yaml, _, _, _, _, content, output = _build_main_batch_test_files(
         tmp_path, runtime="native", docker_support=False
     )
-    monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
-    monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")
-    monkeypatch.setattr(mkbrr_wizard, "_has_prompt_toolkit", False)
-    monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", _Seq(["4", "1", "q"]))
+    cfg = mkbrr_wizard.load_config(config_yaml)
+    monkeypatch.setattr(mkbrr_wizard, "pick_preset", lambda cfg: "btn")
     monkeypatch.setattr(
         mkbrr_wizard,
         "collect_batch_jobs_interactive",
@@ -831,11 +854,10 @@ def test_main_batch_rejects_non_mapping_job_after_schema_validation(
     def fail_run(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("subprocess.run should not be called for non-mapping jobs")
 
-    monkeypatch.setattr(mkbrr_wizard.subprocess, "run", fail_run)
+    executor = SimpleNamespace(run=fail_run)
+    notifier = SimpleNamespace(notify=lambda event: None)
 
-    with pytest.raises(SystemExit):
-        mkbrr_wizard.main()
-
+    assert mkbrr_wizard.handle_batch(cfg, "native", executor, notifier) is False
     assert any("Batch job 2 must be a mapping" in message for message in messages)
 
 

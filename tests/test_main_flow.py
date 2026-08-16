@@ -3,6 +3,8 @@
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+import pytest  # type: ignore[import-untyped]
+
 from .conftest import _Seq
 
 
@@ -10,9 +12,8 @@ def _mk_args(config_path: str) -> SimpleNamespace:
     return SimpleNamespace(config=config_path, docker=False, native=False)
 
 
-def test_handle_inspect_uses_executor_and_notifies(
-    tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
-) -> None:
+@pytest.fixture
+def native_handler_cfg(tmp_path, mkbrr_wizard: ModuleType) -> Any:
     config_yaml = tmp_path / "config.yaml"
     config_yaml.write_text(
         f"""
@@ -28,7 +29,12 @@ paths:
   container_config_dir: /root/.config/mkbrr
 """
     )
-    cfg = mkbrr_wizard.load_config(config_yaml)
+    return mkbrr_wizard.load_config(config_yaml)
+
+
+def test_handle_inspect_uses_executor_and_notifies(
+    mkbrr_wizard: ModuleType, monkeypatch: Any, native_handler_cfg: Any
+) -> None:
     executed: list[Any] = []
     notifications: list[Any] = []
     monkeypatch.setattr(mkbrr_wizard, "ask_path", lambda *args, **kwargs: "/torrents/test.torrent")
@@ -42,7 +48,7 @@ paths:
     executor = SimpleNamespace(run=run)
     notifier = SimpleNamespace(notify=notifications.append)
 
-    mkbrr_wizard.handle_inspect(cfg, "native", executor, notifier)
+    assert mkbrr_wizard.handle_inspect(native_handler_cfg, "native", executor, notifier) is True
 
     assert len(executed) == 1
     assert executed[0].argv == ("mkbrr", "inspect", "/torrents/test.torrent", "-v")
@@ -52,24 +58,8 @@ paths:
 
 
 def test_handle_check_uses_executor_and_notifies(
-    tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
+    tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any, native_handler_cfg: Any
 ) -> None:
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
-runtime: native
-docker_support: false
-chown: false
-paths:
-  host_data_root: {tmp_path}/data
-  container_data_root: /data
-  host_output_dir: {tmp_path}/torrents
-  container_output_dir: /torrentfiles
-  host_config_dir: {tmp_path}/cfg
-  container_config_dir: /root/.config/mkbrr
-"""
-    )
-    cfg = mkbrr_wizard.load_config(config_yaml)
     content_path = tmp_path / "data" / "movie.mkv"
     content_path.parent.mkdir()
     content_path.write_text("x")
@@ -95,7 +85,7 @@ paths:
     executor = SimpleNamespace(run=run)
     notifier = SimpleNamespace(notify=notifications.append)
 
-    mkbrr_wizard.handle_check(cfg, "native", executor, notifier)
+    assert mkbrr_wizard.handle_check(native_handler_cfg, "native", executor, notifier) is True
 
     assert len(executed) == 1
     assert executed[0].argv == (
@@ -109,6 +99,37 @@ paths:
     assert len(notifications) == 1
     assert notifications[0].event_type == "check"
     assert notifications[0].details["elapsed"] == 2.5
+
+
+def test_handle_create_uses_executor_and_notifies(
+    tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any, native_handler_cfg: Any
+) -> None:
+    content_path = tmp_path / "data" / "movie.mkv"
+    content_path.parent.mkdir()
+    content_path.write_text("x")
+    executed: list[Any] = []
+    notifications: list[Any] = []
+    monkeypatch.setattr(mkbrr_wizard, "pick_preset", lambda cfg: "scene")
+    monkeypatch.setattr(mkbrr_wizard, "ask_path", lambda *args, **kwargs: str(content_path))
+    monkeypatch.setattr(mkbrr_wizard, "scan_episodes", lambda path: [])
+    monkeypatch.setattr(mkbrr_wizard, "detect_storage_type", lambda *args, **kwargs: "ssd")
+    monkeypatch.setattr(mkbrr_wizard, "resolve_workers", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mkbrr_wizard, "confirm_cmd", lambda *args, **kwargs: True)
+
+    def run(command: Any) -> Any:
+        executed.append(command)
+        return mkbrr_wizard.ExecutionResult(returncode=0, elapsed=3.5)
+
+    executor = SimpleNamespace(run=run)
+    notifier = SimpleNamespace(notify=notifications.append)
+
+    assert mkbrr_wizard.handle_create(native_handler_cfg, "native", executor, notifier) is True
+
+    assert len(executed) == 1
+    assert executed[0].argv[:5] == ("mkbrr", "create", str(content_path), "-P", "scene")
+    assert len(notifications) == 1
+    assert notifications[0].event_type == "create"
+    assert notifications[0].details["elapsed"] == 3.5
 
 
 def test_main_create_inspect_check_native(
