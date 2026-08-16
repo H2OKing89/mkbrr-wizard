@@ -17,6 +17,8 @@ class _Command(Protocol):
 
 class _Notification(Protocol):
     event_type: str
+    success: bool
+    title: str
     details: Mapping[str, object]
 
 
@@ -33,12 +35,13 @@ class _Execution:
 @dataclass
 class _RecordingExecutor:
     elapsed: float
+    returncode: int = 0
     commands: list[_Command] = field(default_factory=list)
 
     def run(self, command: _Command, *, timeout: int | None = None) -> _Execution:
         del timeout
         self.commands.append(command)
-        return _Execution(returncode=0, elapsed=self.elapsed)
+        return _Execution(returncode=self.returncode, elapsed=self.elapsed)
 
 
 @dataclass
@@ -116,6 +119,30 @@ def test_handle_inspect_rejects_missing_native_torrent(
 
     assert executor.commands == []
     assert notifier.events == []
+
+
+def test_handle_inspect_failure_notifies_with_execution_details(
+    tmp_path: Path,
+    mkbrr_wizard: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    native_handler_cfg: _HandlerConfig,
+) -> None:
+    torrent_path = tmp_path / "test.torrent"
+    torrent_path.write_text("torrent")
+    monkeypatch.setattr(mkbrr_wizard, "ask_path", lambda *_args, **_kwargs: str(torrent_path))
+    monkeypatch.setattr(mkbrr_wizard, "ask_verbose", lambda _mode: False)
+    monkeypatch.setattr(mkbrr_wizard, "confirm_cmd", lambda *_args, **_kwargs: True)
+
+    executor = _RecordingExecutor(elapsed=1.5, returncode=7)
+    notifier = _RecordingNotifier()
+
+    assert mkbrr_wizard.handle_inspect(native_handler_cfg, "native", executor, notifier) is True
+
+    assert len(notifier.events) == 1
+    event = notifier.events[0]
+    assert event.success is False
+    assert event.title == "Inspect Failed"
+    assert event.details["exit_code"] == 7
 
 
 def test_handle_check_uses_executor_and_notifies(
@@ -230,6 +257,60 @@ def test_handle_split_series_rejects_preset_include_patterns(
     assert notifier.events == []
 
 
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        pytest.param("presets: [", "Could not read presets file", id="invalid_yaml"),
+        pytest.param(
+            "default:\n  include_patterns: '*.mkv'\n",
+            "expected a list",
+            id="invalid_include_patterns",
+        ),
+    ],
+)
+def test_preset_include_patterns_reports_invalid_preset_files(
+    tmp_path: Path, mkbrr_wizard: ModuleType, content: str, message: str
+) -> None:
+    presets_path = tmp_path / "presets.yaml"
+    presets_path.write_text(content)
+
+    with pytest.raises(ValueError, match=message):
+        mkbrr_wizard.preset_include_patterns(str(presets_path), "scene")
+
+
+def test_handle_split_series_reports_preset_read_error(
+    tmp_path: Path,
+    mkbrr_wizard: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    native_handler_cfg: _HandlerConfig,
+) -> None:
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "preset_include_patterns",
+        lambda *_args: (_ for _ in ()).throw(ValueError("Could not read presets file")),
+    )
+    printed: list[str] = []
+    monkeypatch.setattr(mkbrr_wizard.console, "print", lambda value: printed.append(str(value)))
+
+    assert (
+        mkbrr_wizard.handle_split_series(
+            native_handler_cfg,
+            "native",
+            _RecordingExecutor(elapsed=1.0),
+            _RecordingNotifier(),
+            preset="scene",
+            raw=str(tmp_path / "data" / "Show.S01"),
+            content_path=str(tmp_path / "data" / "Show.S01"),
+            host_data_root_override=None,
+            episodes=[((1, 1), "Show.S01E01.mkv"), ((1, 2), "Show.S01E02.mkv")],
+            episode_keys=[(1, 1), (1, 2)],
+        )
+        is False
+    )
+
+    assert any("Could not read presets file" in value for value in printed)
+
+
 def test_main_create_inspect_check_native(
     tmp_path: Path, mkbrr_wizard: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -307,7 +388,7 @@ presets_yaml: {presets_yaml}
 
     # Subprocess.run: simulate success returncodes
     class Dummy:
-        def __init__(self, returncode=0):
+        def __init__(self, returncode=0) -> None:
             self.returncode = returncode
 
     monkeypatch.setattr(mkbrr_wizard.subprocess, "run", lambda *_args, **_kwargs: Dummy(0))
@@ -351,7 +432,7 @@ presets_yaml: presets.yaml
 
     # don't actually invoke docker; patch subprocess.run
     class Dummy:
-        def __init__(self, returncode=0):
+        def __init__(self, returncode=0) -> None:
             self.returncode = returncode
 
     monkeypatch.setattr(mkbrr_wizard.subprocess, "run", lambda *_args, **_kwargs: Dummy(0))

@@ -96,6 +96,14 @@ def test_backend_for_runtime_selects_expected_backend(
     assert backend.runtime == runtime
 
 
+@pytest.mark.parametrize("runtime", ["auto", "invalid"])
+def test_backend_for_runtime_rejects_unsupported_runtime(
+    mkbrr_wizard: ModuleType, runtime: str
+) -> None:
+    with pytest.raises(ValueError, match="Unsupported runtime"):
+        mkbrr_wizard.backend_for_runtime(runtime)
+
+
 def test_command_executor_runs_command_spec(mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:
     calls: list[tuple[tuple[str, ...], str | None, bool, int | None]] = []
 

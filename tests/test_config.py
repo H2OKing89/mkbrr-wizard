@@ -50,7 +50,7 @@ chown: false
         assert cfg.chown is False
         # Defaults
         assert cfg.mkbrr.binary == "mkbrr"
-        assert cfg.mkbrr.image == "ghcr.io/autobrr/mkbrr:v1.24.1"
+        assert cfg.mkbrr.image == mkbrr_wizard.DEFAULT_MKBRR_IMAGE
         assert cfg.ownership.uid == 99
         assert cfg.ownership.gid == 100
         assert cfg.unraid.enabled is False
@@ -294,7 +294,7 @@ unraid:
 
         cfg = mkbrr_wizard.load_config(sample_path)
 
-        assert cfg.mkbrr.image == "ghcr.io/autobrr/mkbrr:v1.24.1"
+        assert cfg.mkbrr.image == mkbrr_wizard.DEFAULT_MKBRR_IMAGE
 
     def test_invalid_runtime_raises(self, tmp_path: Path, mkbrr_wizard: ModuleType) -> None:
         """Invalid runtime value should raise ValueError."""

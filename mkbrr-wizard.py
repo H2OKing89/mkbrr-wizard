@@ -43,6 +43,7 @@ try:
         ConfigDict,
         Field,
         ValidationError,
+        ValidationInfo,
         computed_field,
         field_validator,
         model_validator,
@@ -149,12 +150,34 @@ def _coerce_bool(v: Any) -> Any:
 
 
 class _StrictConfigModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, validate_default=True)
+
+
+def _normalize_choice(value: str, field_name: str, choices: tuple[str, ...]) -> str:
+    normalized = value.strip().lower()
+    if normalized not in choices:
+        raise ValueError(f"{field_name} must be one of: {', '.join(choices)}")
+    return normalized
+
+
+def _coerce_legacy_int(value: Any) -> Any:
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, float) and not value.is_integer():
+        return value
+    with contextlib.suppress(TypeError, ValueError, OverflowError):
+        return int(value)
+    return value
 
 
 class _MkbrrInput(_StrictConfigModel):
     binary: str = "mkbrr"
     image: str = DEFAULT_MKBRR_IMAGE
+
+    @field_validator("binary", "image")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
 
 
 class _PathsInput(_StrictConfigModel):
@@ -180,10 +203,28 @@ class _OwnershipInput(_StrictConfigModel):
     uid: int = 99
     gid: int = 100
 
+    _normalize_legacy_ints = field_validator("uid", "gid", mode="before")(_coerce_legacy_int)
+
 
 class _BatchInput(_StrictConfigModel):
     mode: str = "simple"
     job_timeout_seconds: int | None = None
+
+    _normalize_legacy_timeout = field_validator("job_timeout_seconds", mode="before")(
+        _coerce_legacy_int
+    )
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, value: str) -> str:
+        return _normalize_choice(value, "batch.mode", ("simple", "advanced"))
+
+    @field_validator("job_timeout_seconds")
+    @classmethod
+    def _validate_timeout(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("batch.job_timeout_seconds must be a positive integer")
+        return value
 
 
 class _UnraidInput(_StrictConfigModel):
@@ -195,6 +236,44 @@ class _UnraidInput(_StrictConfigModel):
     split_share_max_entries: int = 20000
     split_share_follow_symlinks: bool = False
 
+    _coerce_legacy_bools = field_validator("enabled", "split_share_follow_symlinks", mode="before")(
+        _coerce_bool
+    )
+    _normalize_legacy_max_entries = field_validator("split_share_max_entries", mode="before")(
+        _coerce_legacy_int
+    )
+
+    @field_validator("fuse_root")
+    @classmethod
+    def _expand_fuse_root(cls, value: str) -> str:
+        return _expand_path(value).rstrip("/")
+
+    @field_validator("mount_priority")
+    @classmethod
+    def _validate_mount_priority(cls, value: str) -> str:
+        return _normalize_choice(value, "unraid.mount_priority", ("disk_first", "cache_first"))
+
+    @field_validator("split_share_preflight")
+    @classmethod
+    def _validate_preflight_mode(cls, value: str) -> str:
+        return _normalize_choice(value, "unraid.split_share_preflight", ("off", "warn", "fail"))
+
+    @field_validator("split_share_unmapped_docker_path")
+    @classmethod
+    def _validate_unmapped_docker_path_mode(cls, value: str) -> str:
+        return _normalize_choice(
+            value,
+            "unraid.split_share_unmapped_docker_path",
+            ("off", "warn", "fail"),
+        )
+
+    @field_validator("split_share_max_entries")
+    @classmethod
+    def _validate_max_entries(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("unraid.split_share_max_entries must be a positive integer")
+        return value
+
 
 class _WorkersInput(_StrictConfigModel):
     hdd: int | None = 1
@@ -203,7 +282,7 @@ class _WorkersInput(_StrictConfigModel):
 
     @field_validator("hdd", "ssd", "default", mode="before")
     @classmethod
-    def _normalize_workers(cls, value: Any, info: Any) -> int | None | Any:
+    def _normalize_workers(cls, value: Any, info: ValidationInfo) -> int | None:
         if value is None:
             return None
         if isinstance(value, str):
@@ -225,15 +304,59 @@ class _PushoverInput(_StrictConfigModel):
     failure_priority: int = 1
     device: str = ""
 
+    _coerce_legacy_enabled = field_validator("enabled", mode="before")(_coerce_bool)
+    _normalize_legacy_priorities = field_validator("priority", "failure_priority", mode="before")(
+        _coerce_legacy_int
+    )
+
+    @field_validator("app_token", "user_key")
+    @classmethod
+    def _expand_tokens(cls, value: str) -> str:
+        return _expand_env(value)
+
+    @field_validator("device")
+    @classmethod
+    def _strip_device(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("priority", "failure_priority")
+    @classmethod
+    def _validate_priority(cls, value: int, info: ValidationInfo) -> int:
+        if not -2 <= value <= 1:
+            raise ValueError(
+                f"notifications.pushover.{info.field_name} must be between -2 and 1; "
+                "priority 2 requires retry and expire settings, which are not supported."
+            )
+        return value
+
 
 class _DiscordInput(_StrictConfigModel):
     enabled: bool = False
     webhook_url: str = ""
     username: str = "mkbrr-wizard"
     avatar_url: str = ""
-    color_success: int | str = 0x2ECC71
-    color_failure: int | str = 0xE74C3C
-    color_partial: int | str = 0xF39C12
+    color_success: int = 0x2ECC71
+    color_failure: int = 0xE74C3C
+    color_partial: int = 0xF39C12
+
+    _coerce_legacy_enabled = field_validator("enabled", mode="before")(_coerce_bool)
+
+    @field_validator("webhook_url")
+    @classmethod
+    def _expand_webhook_url(cls, value: str) -> str:
+        return _expand_env(value)
+
+    @field_validator("username", "avatar_url")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("color_success", "color_failure", "color_partial", mode="before")
+    @classmethod
+    def _parse_color(cls, value: int | str) -> int | str:
+        if isinstance(value, str):
+            return int(value, 0)
+        return value
 
 
 class _NotificationsInput(_StrictConfigModel):
@@ -242,6 +365,16 @@ class _NotificationsInput(_StrictConfigModel):
     pushover: _PushoverInput = Field(default_factory=_PushoverInput)
     discord: _DiscordInput = Field(default_factory=_DiscordInput)
     timeout_seconds: int = 10
+
+    _coerce_legacy_enabled = field_validator("enabled", mode="before")(_coerce_bool)
+    _normalize_legacy_timeout = field_validator("timeout_seconds", mode="before")(
+        _coerce_legacy_int
+    )
+
+    @field_validator("policy")
+    @classmethod
+    def _validate_policy(cls, value: str) -> str:
+        return _normalize_choice(value, "notifications.policy", ("summary", "failures_only", "off"))
 
 
 class _AppConfigInput(_StrictConfigModel):
@@ -257,6 +390,49 @@ class _AppConfigInput(_StrictConfigModel):
     notifications: _NotificationsInput = Field(default_factory=_NotificationsInput)
     workers: _WorkersInput = Field(default_factory=_WorkersInput)
     presets_yaml: str = "presets.yaml"
+
+    _coerce_legacy_bools = field_validator("docker_support", "chown", mode="before")(_coerce_bool)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_sections(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        raw = dict(value)
+        for section in (
+            "mkbrr",
+            "paths",
+            "ownership",
+            "batch",
+            "unraid",
+            "notifications",
+            "workers",
+        ):
+            if raw.get(section) is None:
+                raw[section] = {}
+        notifications = raw.get("notifications")
+        if isinstance(notifications, dict):
+            for provider in ("pushover", "discord"):
+                if notifications.get(provider) is None:
+                    notifications[provider] = {}
+        return raw
+
+    @field_validator("runtime")
+    @classmethod
+    def _validate_runtime(cls, value: str) -> str:
+        return _normalize_choice(value, "runtime", ("auto", "docker", "native"))
+
+    @field_validator("docker_user")
+    @classmethod
+    def _normalize_docker_user(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("presets_yaml")
+    @classmethod
+    def _normalize_presets_yaml(cls, value: str) -> str:
+        return value.strip()
 
 
 MkbrrCfg = _MkbrrInput
@@ -307,16 +483,6 @@ _LEGACY_BOOL_PATHS = (
     ("notifications", "discord", "enabled"),
 )
 
-_LEGACY_INT_PATHS = (
-    ("ownership", "uid"),
-    ("ownership", "gid"),
-    ("batch", "job_timeout_seconds"),
-    ("unraid", "split_share_max_entries"),
-    ("notifications", "timeout_seconds"),
-    ("notifications", "pushover", "priority"),
-    ("notifications", "pushover", "failure_priority"),
-)
-
 
 def _resolve_config_path(
     raw: dict[str, Any], path_parts: tuple[str, ...]
@@ -349,41 +515,6 @@ def _migrate_legacy_ture(raw: dict[str, Any]) -> None:
             UserWarning,
             stacklevel=2,
         )
-
-
-def _normalize_null_config_sections(raw: dict[str, Any]) -> None:
-    for section in ("mkbrr", "paths", "ownership", "batch", "unraid", "notifications", "workers"):
-        if section in raw and raw[section] is None:
-            raw[section] = {}
-
-    notifications = raw.get("notifications")
-    if isinstance(notifications, dict):
-        for provider in ("pushover", "discord"):
-            if provider in notifications and notifications[provider] is None:
-                notifications[provider] = {}
-
-
-def _normalize_legacy_config_scalars(raw: dict[str, Any]) -> None:
-    for path_parts in _LEGACY_BOOL_PATHS:
-        resolved = _resolve_config_path(raw, path_parts)
-        if resolved is None:
-            continue
-        node, field_name = resolved
-        if field_name in node:
-            node[field_name] = _coerce_bool(node[field_name])
-
-    for path_parts in _LEGACY_INT_PATHS:
-        resolved = _resolve_config_path(raw, path_parts)
-        if resolved is None:
-            continue
-        node, field_name = resolved
-        value = node.get(field_name)
-        if value is None or isinstance(value, bool):
-            continue
-        if isinstance(value, float) and not value.is_integer():
-            continue
-        with contextlib.suppress(TypeError, ValueError, OverflowError):
-            node[field_name] = int(value)
 
 
 def _expand_env(s: str) -> str:
@@ -607,212 +738,14 @@ def load_config(path: Path) -> AppCfg:
     else:
         raise FileNotFoundError(f"Config not found: {path}")
 
-    _normalize_null_config_sections(raw)
     _migrate_legacy_ture(raw)
-    _normalize_legacy_config_scalars(raw)
     try:
-        raw = cast(dict[str, Any], _AppConfigInput.model_validate(raw).model_dump())
+        return cast(AppCfg, AppCfg.model_validate(raw))
     except ValidationError as e:
         errors = e.errors(include_url=False, include_input=False)
         raise ValueError(
             f"Invalid configuration:\n{json.dumps(errors, indent=2, default=str)}"
         ) from e
-
-    runtime = str(raw.get("runtime", "auto")).strip().lower()
-    if runtime not in ("auto", "docker", "native"):
-        raise ValueError("runtime must be one of: auto, docker, native")
-
-    docker_support = _coerce_bool(raw.get("docker_support", True))
-    chown = _coerce_bool(raw.get("chown", True))
-    docker_user = raw.get("docker_user")
-    docker_user = str(docker_user).strip() if docker_user else None
-
-    mkbrr_node: dict[str, Any] = cast(dict[str, Any], raw.get("mkbrr") or {})
-    mkbrr = MkbrrCfg(
-        binary=str(mkbrr_node.get("binary", "mkbrr")).strip(),
-        image=str(mkbrr_node.get("image", DEFAULT_MKBRR_IMAGE)).strip(),
-    )
-
-    paths_node: dict[str, Any] = cast(dict[str, Any], raw.get("paths") or {})
-    paths = PathsCfg(
-        host_data_root=_expand_path(str(paths_node.get("host_data_root", "/mnt/user/data"))).rstrip(
-            "/"
-        ),
-        container_data_root=str(paths_node.get("container_data_root", "/data")).rstrip("/"),
-        host_output_dir=_expand_path(
-            str(paths_node.get("host_output_dir", "/mnt/user/data/downloads/torrents/torrentfiles"))
-        ).rstrip("/"),
-        container_output_dir=str(paths_node.get("container_output_dir", "/torrentfiles")).rstrip(
-            "/"
-        ),
-        host_config_dir=_expand_path(
-            str(paths_node.get("host_config_dir", "/mnt/cache/appdata/mkbrr"))
-        ).rstrip("/"),
-        container_config_dir=str(
-            paths_node.get("container_config_dir", "/root/.config/mkbrr")
-        ).rstrip("/"),
-    )
-
-    ownership_node: dict[str, Any] = cast(dict[str, Any], raw.get("ownership") or {})
-    ownership = OwnershipCfg(
-        uid=int(ownership_node.get("uid", 99)),
-        gid=int(ownership_node.get("gid", 100)),
-    )
-
-    batch_node: dict[str, Any] = cast(dict[str, Any], raw.get("batch") or {})
-    batch_mode = str(batch_node.get("mode", "simple")).strip().lower()
-    if batch_mode not in ("simple", "advanced"):
-        raise ValueError("batch.mode must be one of: simple, advanced")
-
-    timeout_raw = batch_node.get("job_timeout_seconds")
-    job_timeout_seconds: int | None = None
-    if timeout_raw is not None:
-        timeout_val = int(timeout_raw)
-        if timeout_val <= 0:
-            raise ValueError("batch.job_timeout_seconds must be a positive integer")
-        job_timeout_seconds = timeout_val
-
-    batch = BatchCfg(mode=batch_mode, job_timeout_seconds=job_timeout_seconds)
-
-    unraid_node: dict[str, Any] = cast(dict[str, Any], raw.get("unraid") or {})
-    mount_priority = str(unraid_node.get("mount_priority", "disk_first")).strip().lower()
-    if mount_priority not in ("disk_first", "cache_first"):
-        raise ValueError("unraid.mount_priority must be one of: disk_first, cache_first")
-
-    preflight_mode = str(unraid_node.get("split_share_preflight", "fail")).strip().lower()
-    if preflight_mode not in ("off", "warn", "fail"):
-        raise ValueError("unraid.split_share_preflight must be one of: off, warn, fail")
-
-    unmapped_docker_path_mode = (
-        str(unraid_node.get("split_share_unmapped_docker_path", "warn")).strip().lower()
-    )
-    if unmapped_docker_path_mode not in ("off", "warn", "fail"):
-        raise ValueError("unraid.split_share_unmapped_docker_path must be one of: off, warn, fail")
-
-    split_share_max_entries = int(unraid_node.get("split_share_max_entries", 20000))
-    if split_share_max_entries <= 0:
-        raise ValueError("unraid.split_share_max_entries must be a positive integer")
-
-    unraid = UnraidCfg(
-        enabled=_coerce_bool(unraid_node.get("enabled", False)),
-        fuse_root=_expand_path(str(unraid_node.get("fuse_root", "/mnt/user"))).rstrip("/"),
-        mount_priority=mount_priority,
-        split_share_preflight=preflight_mode,
-        split_share_unmapped_docker_path=unmapped_docker_path_mode,
-        split_share_max_entries=split_share_max_entries,
-        split_share_follow_symlinks=_coerce_bool(
-            unraid_node.get("split_share_follow_symlinks", False)
-        ),
-    )
-
-    presets_yaml_raw = str(raw.get("presets_yaml", "presets.yaml")).strip()
-
-    # Expand first (handles ~/ and $HOME/ etc)
-    presets_yaml_expanded = _expand_path(presets_yaml_raw)
-
-    # If it's still not absolute after expansion, treat it as relative to host_config_dir
-    if os.path.isabs(presets_yaml_expanded):
-        presets_host = presets_yaml_expanded
-    else:
-        presets_host = str(Path(paths.host_config_dir) / presets_yaml_raw)
-
-    # ---- notifications ----
-    notif_node: dict[str, Any] = cast(dict[str, Any], raw.get("notifications") or {})
-    notif_enabled = _coerce_bool(notif_node.get("enabled", False))
-
-    notif_policy = str(notif_node.get("policy", "summary")).strip().lower()
-    if notif_policy not in ("summary", "failures_only", "off"):
-        raise ValueError("notifications.policy must be one of: summary, failures_only, off")
-
-    po_node: dict[str, Any] = cast(dict[str, Any], notif_node.get("pushover") or {})
-    pushover_priority = int(po_node.get("priority", 0))
-    pushover_failure_priority = int(po_node.get("failure_priority", 1))
-    for field_name, priority in (
-        ("priority", pushover_priority),
-        ("failure_priority", pushover_failure_priority),
-    ):
-        if not -2 <= priority <= 1:
-            raise ValueError(
-                f"notifications.pushover.{field_name} must be between -2 and 1; "
-                "priority 2 requires retry and expire settings, which are not supported."
-            )
-
-    pushover = PushoverCfg(
-        enabled=_coerce_bool(po_node.get("enabled", False)),
-        app_token=_expand_env(str(po_node.get("app_token", ""))),
-        user_key=_expand_env(str(po_node.get("user_key", ""))),
-        priority=pushover_priority,
-        failure_priority=pushover_failure_priority,
-        device=str(po_node.get("device", "")).strip(),
-    )
-
-    dc_node: dict[str, Any] = cast(dict[str, Any], notif_node.get("discord") or {})
-    discord_color_success = dc_node.get("color_success", 0x2ECC71)
-    discord_color_failure = dc_node.get("color_failure", 0xE74C3C)
-    discord_color_partial = dc_node.get("color_partial", 0xF39C12)
-    # Handle hex strings from YAML (0x... is parsed as string by YAML)
-    if isinstance(discord_color_success, str):
-        discord_color_success = int(discord_color_success, 0)
-    if isinstance(discord_color_failure, str):
-        discord_color_failure = int(discord_color_failure, 0)
-    if isinstance(discord_color_partial, str):
-        discord_color_partial = int(discord_color_partial, 0)
-
-    discord = DiscordCfg(
-        enabled=_coerce_bool(dc_node.get("enabled", False)),
-        webhook_url=_expand_env(str(dc_node.get("webhook_url", ""))),
-        username=str(dc_node.get("username", "mkbrr-wizard")).strip(),
-        avatar_url=str(dc_node.get("avatar_url", "")).strip(),
-        color_success=int(discord_color_success),
-        color_failure=int(discord_color_failure),
-        color_partial=int(discord_color_partial),
-    )
-
-    notifications = NotificationsCfg(
-        enabled=notif_enabled,
-        policy=notif_policy,
-        pushover=pushover,
-        discord=discord,
-        timeout_seconds=int(notif_node.get("timeout_seconds", 10)),
-    )
-
-    # ---- workers auto-tune ----
-    workers_node: dict[str, Any] = cast(dict[str, Any], raw.get("workers") or {})
-
-    def _parse_workers_val(v: Any, field_name: str) -> int | None:
-        if v is None:
-            return None
-        s = str(v).strip().lower()
-        if s in ("auto", ""):
-            return None
-        try:
-            val = int(s)
-            if val <= 0:
-                raise ValueError(f"workers.{field_name} must be a positive integer or 'auto'")
-            return val
-        except (ValueError, TypeError) as err:
-            raise ValueError(f"workers.{field_name} must be a positive integer or 'auto'") from err
-
-    workers_cfg = WorkersCfg(
-        hdd=_parse_workers_val(workers_node.get("hdd", 1), "hdd"),
-        ssd=_parse_workers_val(workers_node.get("ssd", "auto"), "ssd"),
-        default=_parse_workers_val(workers_node.get("default", "auto"), "default"),
-    )
-
-    return AppCfg(
-        runtime=runtime,
-        docker_support=docker_support,
-        chown=chown,
-        docker_user=docker_user,
-        mkbrr=mkbrr,
-        paths=paths,
-        ownership=ownership,
-        batch=batch,
-        presets_yaml=presets_host,
-        unraid=unraid,
-        notifications=notifications,
-        workers=workers_cfg,
-    )
 
 
 # ----------------------------
@@ -1447,14 +1380,19 @@ def preflight_unraid_split_share(
         base_msg += "\n  examples: " + ", ".join(missing_examples)
 
     if mode == "warn":
+        try:
+            fallback = _resolved_content_for_host_path(
+                cfg,
+                resolved.runtime,
+                resolved.fuse_host_path,
+                resolved.fuse_host_path,
+                used_fuse_fallback=True,
+            )
+        except ValueError:
+            console.print(f"[warn]⚠ {base_msg}\nUsing resolved mount for this operation.[/]")
+            return resolved
         console.print(f"[warn]⚠ {base_msg}\nUsing FUSE path for this operation.[/]")
-        return _resolved_content_for_host_path(
-            cfg,
-            resolved.runtime,
-            resolved.fuse_host_path,
-            resolved.fuse_host_path,
-            used_fuse_fallback=True,
-        )
+        return fallback
 
     raise ValueError(
         base_msg
@@ -1569,6 +1507,7 @@ def parse_split_ranges(input_str: str, available: list[EpisodeKey]) -> list[list
 
     Raises ``ValueError`` on:
     * overlapping ranges
+    * ranges that omit any available episode
     * a range that references zero available episodes
     * unparseable tokens
     """
@@ -1775,8 +1714,7 @@ def build_batch_job_create_command(
     for seed in job.webseeds:
         cmd += ["--web-seed", seed]
 
-    if job.private is not None:
-        cmd.append(f"--private={str(job.private).lower()}")
+    _append_optional_bool(cmd, "--private", job.private)
 
     _append_optional_bool(cmd, "--no-date", job.no_date)
     _append_optional_bool(cmd, "--entropy", job.entropy)
@@ -1972,7 +1910,10 @@ def preset_include_patterns(host_presets_yaml: str, preset: str) -> tuple[str, .
     if not preset_path.exists():
         return ()
 
-    loaded = yaml.safe_load(preset_path.read_text(encoding="utf-8"))
+    try:
+        loaded = yaml.safe_load(preset_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        raise ValueError(f"Could not read presets file {preset_path}: {error}") from error
     if not isinstance(loaded, Mapping):
         return ()
 
@@ -1984,13 +1925,15 @@ def preset_include_patterns(host_presets_yaml: str, preset: str) -> tuple[str, .
             continue
         include_patterns = node.get("include_patterns")
         if isinstance(include_patterns, list):
-            patterns.extend(
-                pattern.strip()
-                for pattern in include_patterns
-                if isinstance(pattern, str) and pattern.strip()
-            )
+            if not all(isinstance(pattern, str) for pattern in include_patterns):
+                raise ValueError(
+                    f"Invalid include_patterns in presets file {preset_path}: expected strings"
+                )
+            patterns.extend(pattern.strip() for pattern in include_patterns if pattern.strip())
         elif include_patterns:
-            patterns.append("<invalid include_patterns setting>")
+            raise ValueError(
+                f"Invalid include_patterns in presets file {preset_path}: expected a list"
+            )
     return tuple(patterns)
 
 
@@ -3256,7 +3199,11 @@ def handle_split_series(
     episodes: list[tuple[EpisodeKey, str]],
     episode_keys: list[EpisodeKey],
 ) -> bool:
-    inherited_include_patterns = preset_include_patterns(cfg.presets_yaml_host, preset)
+    try:
+        inherited_include_patterns = preset_include_patterns(cfg.presets_yaml_host, preset)
+    except ValueError as error:
+        console.print(f"[err]❌ {error}[/]")
+        return False
     if inherited_include_patterns:
         console.print(
             "[err]❌ Split series cannot use a preset with include_patterns because mkbrr "
@@ -3413,7 +3360,6 @@ def handle_create(
 
     content_path = resolved_content.runtime_path
     host_data_root_override = resolved_content.host_mount_override
-    did_split = False
     scan_dir = resolved_content.host_path
     episodes = scan_episodes(scan_dir) if os.path.isdir(scan_dir) else []
     episode_keys = sorted({episode_key for episode_key, _ in episodes})
@@ -3444,60 +3390,57 @@ def handle_create(
                 episode_keys=episode_keys,
             )
 
-    if not did_split:
-        command_spec = build_create_command(
-            cfg,
-            runtime,
-            content_path,
-            preset,
-            host_data_root_override=host_data_root_override,
-        )
+    command_spec = build_create_command(
+        cfg,
+        runtime,
+        content_path,
+        preset,
+        host_data_root_override=host_data_root_override,
+    )
 
-        host_path = _resolve_host_path_for_detection(cfg, runtime, raw, host_data_root_override)
-        storage_type = detect_storage_type(
-            host_path,
-            fuse_root=cfg.unraid.fuse_root,
-            mount_priority=cfg.unraid.mount_priority,
+    host_path = _resolve_host_path_for_detection(cfg, runtime, raw, host_data_root_override)
+    storage_type = detect_storage_type(
+        host_path,
+        fuse_root=cfg.unraid.fuse_root,
+        mount_priority=cfg.unraid.mount_priority,
+    )
+    workers = resolve_workers(storage_type, cfg.workers)
+    if workers is not None:
+        command_spec = command_spec.with_args("--workers", str(workers))
+        console.print(
+            f"[info]ℹ Storage detected as {storage_type.upper()} → --workers {workers}[/]"
         )
-        workers = resolve_workers(storage_type, cfg.workers)
-        if workers is not None:
-            command_spec = command_spec.with_args("--workers", str(workers))
-            console.print(
-                f"[info]ℹ Storage detected as {storage_type.upper()} → --workers {workers}[/]"
+    else:
+        console.print(f"[info]ℹ Storage detected as {storage_type.upper()} → workers auto[/]")
+
+    if workers is None:
+        command_spec = command_spec.with_args("--workers", "0")
+
+    if confirm_cmd(command_spec.argv, cwd=command_spec.cwd):
+        outputs_before = _snapshot_torrent_outputs(cfg.paths.host_output_dir) if cfg.chown else {}
+        execution = executor.run(command_spec)
+        if execution.returncode == 0:
+            console.print("[ok]✅ mkbrr create finished.[/]")
+            outputs_after = _snapshot_torrent_outputs(cfg.paths.host_output_dir)
+            maybe_fix_torrent_permissions(
+                cfg,
+                _changed_torrent_outputs(outputs_before, outputs_after),
             )
         else:
-            console.print(f"[info]ℹ Storage detected as {storage_type.upper()} → workers auto[/]")
-
-        if workers is None:
-            command_spec = command_spec.with_args("--workers", "0")
-
-        if confirm_cmd(command_spec.argv, cwd=command_spec.cwd):
-            outputs_before = (
-                _snapshot_torrent_outputs(cfg.paths.host_output_dir) if cfg.chown else {}
+            console.print(f"[err]❌ mkbrr exited with code {execution.returncode}[/]")
+        notifier.notify(
+            NotifyEvent(
+                event_type="create",
+                success=execution.returncode == 0,
+                title="Torrent Created" if execution.returncode == 0 else "Create Failed",
+                details={
+                    "path": raw,
+                    "preset": preset,
+                    "exit_code": execution.returncode,
+                    "elapsed": execution.elapsed,
+                },
             )
-            execution = executor.run(command_spec)
-            if execution.returncode == 0:
-                console.print("[ok]✅ mkbrr create finished.[/]")
-                outputs_after = _snapshot_torrent_outputs(cfg.paths.host_output_dir)
-                maybe_fix_torrent_permissions(
-                    cfg,
-                    _changed_torrent_outputs(outputs_before, outputs_after),
-                )
-            else:
-                console.print(f"[err]❌ mkbrr exited with code {execution.returncode}[/]")
-            notifier.notify(
-                NotifyEvent(
-                    event_type="create",
-                    success=execution.returncode == 0,
-                    title="Torrent Created" if execution.returncode == 0 else "Create Failed",
-                    details={
-                        "path": raw,
-                        "preset": preset,
-                        "exit_code": execution.returncode,
-                        "elapsed": execution.elapsed,
-                    },
-                )
-            )
+        )
     return True
 
 

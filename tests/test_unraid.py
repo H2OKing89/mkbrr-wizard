@@ -3,37 +3,54 @@
 from __future__ import annotations
 
 from types import ModuleType
-from typing import Any
+from typing import Any, Protocol, cast
 
 import pytest  # type: ignore[import-untyped]
 
 
+class _UnraidConfig(Protocol):
+    runtime: str
+    docker_support: bool
+    chown: bool
+    docker_user: str | None
+    mkbrr: Any
+    paths: Any
+    ownership: Any
+    batch: Any
+    presets_yaml_host: str
+    presets_yaml_container: str
+    unraid: Any
+
+
 @pytest.fixture
-def unraid_cfg(mkbrr_wizard: ModuleType) -> Any:
-    return mkbrr_wizard.AppCfg(
-        runtime="auto",
-        docker_support=True,
-        chown=False,
-        docker_user=None,
-        mkbrr=mkbrr_wizard.MkbrrCfg(binary="mkbrr", image="ghcr.io/autobrr/mkbrr"),
-        paths=mkbrr_wizard.PathsCfg(
-            host_data_root="/mnt/user/data",
-            container_data_root="/data",
-            host_output_dir="/mnt/cache-temp/data/downloads/torrents/torrentfiles",
-            container_output_dir="/torrentfiles",
-            host_config_dir="/mnt/cache/appdata/mkbrr",
-            container_config_dir="/root/.config/mkbrr",
+def unraid_cfg(mkbrr_wizard: ModuleType) -> _UnraidConfig:
+    return cast(
+        _UnraidConfig,
+        mkbrr_wizard.AppCfg(
+            runtime="auto",
+            docker_support=True,
+            chown=False,
+            docker_user=None,
+            mkbrr=mkbrr_wizard.MkbrrCfg(binary="mkbrr", image="ghcr.io/autobrr/mkbrr"),
+            paths=mkbrr_wizard.PathsCfg(
+                host_data_root="/mnt/user/data",
+                container_data_root="/data",
+                host_output_dir="/mnt/cache-temp/data/downloads/torrents/torrentfiles",
+                container_output_dir="/torrentfiles",
+                host_config_dir="/mnt/cache/appdata/mkbrr",
+                container_config_dir="/root/.config/mkbrr",
+            ),
+            ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
+            batch=mkbrr_wizard.BatchCfg(mode="simple"),
+            presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
+            presets_yaml_container="/root/.config/mkbrr/presets.yaml",
+            unraid=mkbrr_wizard.UnraidCfg(enabled=True, fuse_root="/mnt/user"),
         ),
-        ownership=mkbrr_wizard.OwnershipCfg(uid=99, gid=100),
-        batch=mkbrr_wizard.BatchCfg(mode="simple"),
-        presets_yaml_host="/mnt/cache/appdata/mkbrr/presets.yaml",
-        presets_yaml_container="/root/.config/mkbrr/presets.yaml",
-        unraid=mkbrr_wizard.UnraidCfg(enabled=True, fuse_root="/mnt/user"),
     )
 
 
 def test_resolve_unraid_disk_path_finds_disk(
-    mkbrr_wizard: ModuleType, unraid_cfg: Any, monkeypatch: Any
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         mkbrr_wizard, "_unraid_candidate_roots", lambda: ["/mnt/disk5", "/mnt/disk7"]
@@ -52,7 +69,7 @@ def test_resolve_unraid_disk_path_finds_disk(
 
 
 def test_resolve_unraid_disk_path_finds_cache(
-    mkbrr_wizard: ModuleType, unraid_cfg: Any, monkeypatch: Any
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         mkbrr_wizard, "_unraid_candidate_roots", lambda: ["/mnt/disk5", "/mnt/cache"]
@@ -71,7 +88,7 @@ def test_resolve_unraid_disk_path_finds_cache(
 
 
 def test_resolve_unraid_disk_path_cache_first_prefers_cache(
-    mkbrr_wizard: ModuleType, unraid_cfg: Any, monkeypatch: Any
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cache_first_cfg = mkbrr_wizard.AppCfg(
         runtime=unraid_cfg.runtime,
@@ -112,14 +129,14 @@ def test_resolve_unraid_disk_path_cache_first_prefers_cache(
 
 
 def test_resolve_unraid_disk_path_non_unraid_path_unchanged(
-    mkbrr_wizard: ModuleType, unraid_cfg: Any
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig
 ) -> None:
     raw = "/tmp/random/path"
     assert mkbrr_wizard.resolve_unraid_disk_path(unraid_cfg, raw) == raw
 
 
 def test_resolve_unraid_content_path_native(
-    mkbrr_wizard: ModuleType, unraid_cfg: Any, monkeypatch: Any
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         mkbrr_wizard,
@@ -141,7 +158,7 @@ def test_resolve_unraid_content_path_native(
 
 
 def test_resolve_unraid_content_path_docker_from_container_path(
-    mkbrr_wizard: ModuleType, unraid_cfg: Any, monkeypatch: Any
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         mkbrr_wizard,
@@ -195,7 +212,7 @@ def test_unraid_disabled_returns_normal_mapping(
     assert resolved.host_mount_override is None
 
 
-def test_docker_run_base_uses_override(mkbrr_wizard: ModuleType, unraid_cfg: Any) -> None:
+def test_docker_run_base_uses_override(mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig) -> None:
     cmd = mkbrr_wizard.docker_run_base(
         unraid_cfg,
         "/data",
@@ -206,7 +223,9 @@ def test_docker_run_base_uses_override(mkbrr_wizard: ModuleType, unraid_cfg: Any
     assert "/mnt/user/data:/data" not in cmd
 
 
-def test_candidate_roots_natural_sort(mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:
+def test_candidate_roots_natural_sort(
+    mkbrr_wizard: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
     class _Entry:
         def __init__(self, path: str):
             self.path = path
@@ -232,7 +251,9 @@ def test_candidate_roots_natural_sort(mkbrr_wizard: ModuleType, monkeypatch: Any
     assert roots == ["/mnt/disk1", "/mnt/disk2", "/mnt/disk10", "/mnt/cache", "/mnt/cache-temp"]
 
 
-def test_candidate_roots_cache_first_order(mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:
+def test_candidate_roots_cache_first_order(
+    mkbrr_wizard: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
     class _Entry:
         def __init__(self, path: str):
             self.path = path
@@ -258,7 +279,7 @@ def test_candidate_roots_cache_first_order(mkbrr_wizard: ModuleType, monkeypatch
 
 
 def test_detect_split_share_mismatch_file_missing(
-    mkbrr_wizard: ModuleType, monkeypatch: Any
+    mkbrr_wizard: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(mkbrr_wizard.os.path, "isfile", lambda p: p == "/mnt/user/data/test.mkv")
     monkeypatch.setattr(mkbrr_wizard.os.path, "isdir", lambda p: False)
@@ -282,7 +303,7 @@ def test_detect_split_share_mismatch_file_missing(
 
 
 def test_preflight_split_share_fail_docker_raises(
-    mkbrr_wizard: ModuleType, unraid_cfg: Any, monkeypatch: Any
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(mkbrr_wizard.os.path, "exists", lambda p: True)
     monkeypatch.setattr(
@@ -306,7 +327,7 @@ def test_preflight_split_share_fail_docker_raises(
 
 
 def test_preflight_split_share_warn_docker_falls_back_to_fuse(
-    mkbrr_wizard: ModuleType, unraid_cfg: Any, monkeypatch: Any
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     warn_cfg = mkbrr_wizard.AppCfg(
         runtime=unraid_cfg.runtime,
@@ -355,8 +376,48 @@ def test_preflight_split_share_warn_docker_falls_back_to_fuse(
     assert fallback.used_fuse_fallback is True
 
 
+def test_preflight_split_share_warn_docker_keeps_physical_plan_when_fuse_unmapped(
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    warn_cfg = mkbrr_wizard.AppCfg(
+        runtime=unraid_cfg.runtime,
+        docker_support=unraid_cfg.docker_support,
+        chown=unraid_cfg.chown,
+        docker_user=unraid_cfg.docker_user,
+        mkbrr=unraid_cfg.mkbrr,
+        paths=unraid_cfg.paths,
+        ownership=unraid_cfg.ownership,
+        batch=unraid_cfg.batch,
+        presets_yaml_host=unraid_cfg.presets_yaml_host,
+        presets_yaml_container=unraid_cfg.presets_yaml_container,
+        unraid=mkbrr_wizard.UnraidCfg(enabled=True, split_share_preflight="warn"),
+    )
+    monkeypatch.setattr(mkbrr_wizard.os.path, "exists", lambda _path: True)
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "_detect_split_share_mismatch",
+        lambda *_args, **_kwargs: (1, ["a.mkv"], 0, False),
+    )
+    resolved = mkbrr_wizard.ResolvedContent(
+        runtime="docker",
+        runtime_path="/data/downloads/pack",
+        host_path="/mnt/disk13/data/downloads/pack",
+        fuse_host_path="/mnt/user/data/downloads/pack",
+        host_mount_override="/mnt/disk13/data",
+    )
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "_resolved_content_for_host_path",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("unmapped FUSE path")),
+    )
+
+    assert (
+        mkbrr_wizard.preflight_unraid_split_share(warn_cfg, resolved, context="create") == resolved
+    )
+
+
 def test_preflight_capped_scan_fails_in_fail_mode(
-    mkbrr_wizard: ModuleType, unraid_cfg: Any, monkeypatch: Any
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(mkbrr_wizard.os.path, "exists", lambda p: True)
     monkeypatch.setattr(
@@ -377,7 +438,7 @@ def test_preflight_capped_scan_fails_in_fail_mode(
 
 
 def test_preflight_permission_error_warn_mode_falls_back_to_fuse(
-    mkbrr_wizard: ModuleType, unraid_cfg: Any, monkeypatch: Any
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     warn_cfg = mkbrr_wizard.AppCfg(
         runtime=unraid_cfg.runtime,
@@ -412,7 +473,9 @@ def test_preflight_permission_error_warn_mode_falls_back_to_fuse(
     assert fallback.used_fuse_fallback is True
 
 
-def test_preflight_off_keeps_physical_plan(mkbrr_wizard: ModuleType, unraid_cfg: Any) -> None:
+def test_preflight_off_keeps_physical_plan(
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig
+) -> None:
     off_cfg = mkbrr_wizard.AppCfg(
         runtime=unraid_cfg.runtime,
         docker_support=unraid_cfg.docker_support,
@@ -440,7 +503,7 @@ def test_preflight_off_keeps_physical_plan(mkbrr_wizard: ModuleType, unraid_cfg:
 
 
 def test_preflight_split_share_native_derives_original(
-    mkbrr_wizard: ModuleType, unraid_cfg: Any, monkeypatch: Any
+    mkbrr_wizard: ModuleType, unraid_cfg: _UnraidConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(mkbrr_wizard.os.path, "exists", lambda p: True)
     captured: dict[str, str] = {}
