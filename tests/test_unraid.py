@@ -135,8 +135,8 @@ def test_resolve_unraid_content_path_native(
 
     assert resolved.runtime_path == "/mnt/disk5/data/downloads/test.mkv"
     assert resolved.host_path == "/mnt/disk5/data/downloads/test.mkv"
+    assert resolved.fuse_host_path == "/mnt/user/data/downloads/test.mkv"
     assert resolved.host_mount_override is None
-    assert resolved.storage_device == "disk5"
     assert resolved.used_fuse_fallback is False
 
 
@@ -157,8 +157,8 @@ def test_resolve_unraid_content_path_docker_from_container_path(
 
     assert resolved.runtime_path == "/data/downloads/test.mkv"
     assert resolved.host_path == "/mnt/disk5/data/downloads/test.mkv"
+    assert resolved.fuse_host_path == "/mnt/user/data/downloads/test.mkv"
     assert resolved.host_mount_override == "/mnt/disk5/data"
-    assert resolved.storage_device == "disk5"
 
 
 def test_unraid_disabled_returns_normal_mapping(
@@ -300,7 +300,6 @@ def test_preflight_split_share_fail_docker_raises(
                 host_path="/mnt/disk13/data/downloads/pack",
                 fuse_host_path="/mnt/user/data/downloads/pack",
                 host_mount_override="/mnt/disk13/data",
-                storage_device="disk13",
             ),
             context="batch job 1",
         )
@@ -342,7 +341,6 @@ def test_preflight_split_share_warn_docker_falls_back_to_fuse(
         host_path="/mnt/disk13/data/downloads/pack",
         fuse_host_path="/mnt/user/data/downloads/pack",
         host_mount_override="/mnt/disk13/data",
-        storage_device="disk13",
     )
 
     fallback = mkbrr_wizard.preflight_unraid_split_share(
@@ -372,7 +370,6 @@ def test_preflight_capped_scan_fails_in_fail_mode(
         host_path="/mnt/disk13/data/downloads/pack",
         fuse_host_path="/mnt/user/data/downloads/pack",
         host_mount_override="/mnt/disk13/data",
-        storage_device="disk13",
     )
 
     with pytest.raises(ValueError, match="scan capped"):
@@ -407,7 +404,6 @@ def test_preflight_permission_error_warn_mode_falls_back_to_fuse(
         host_path="/mnt/disk13/data/downloads/pack",
         fuse_host_path="/mnt/user/data/downloads/pack",
         host_mount_override=None,
-        storage_device="disk13",
     )
 
     fallback = mkbrr_wizard.preflight_unraid_split_share(warn_cfg, resolved, context="create")
@@ -436,7 +432,6 @@ def test_preflight_off_keeps_physical_plan(mkbrr_wizard: ModuleType, unraid_cfg:
         host_path="/mnt/disk13/data/downloads/pack",
         fuse_host_path="/mnt/user/data/downloads/pack",
         host_mount_override=None,
-        storage_device="disk13",
     )
 
     assert (
@@ -465,7 +460,6 @@ def test_preflight_split_share_native_derives_original(
             host_path="/mnt/disk14/data/downloads/pack",
             fuse_host_path="/mnt/user/data/downloads/pack",
             host_mount_override=None,
-            storage_device="disk14",
         ),
         context="create",
     )

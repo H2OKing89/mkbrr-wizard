@@ -424,8 +424,10 @@ def test_build_batch_job_create_command_emits_optional_boolean_overrides(
     spec = mkbrr_wizard.build_batch_job_create_command(cfg, "native", "btn", job)
 
     for flag in fields.values():
-        expected = None if value is None else f"{flag}={str(value).lower()}"
-        assert expected in spec.argv if expected else flag not in spec.argv
+        if value is None:
+            assert not any(argument.startswith(flag) for argument in spec.argv)
+        else:
+            assert f"{flag}={str(value).lower()}" in spec.argv
 
 
 @pytest.mark.parametrize(
@@ -605,6 +607,14 @@ def test_handle_batch_executes_job_notifies_and_fixes_ownership(
         "maybe_fix_torrent_permissions",
         lambda cfg, paths: owned_paths.extend(paths),
     )
+    original_preflight = mkbrr_wizard.preflight_unraid_split_share
+    preflight_calls: list[str] = []
+
+    def preflight(cfg: Any, resolved: Any, *, context: str) -> Any:
+        preflight_calls.append(context)
+        return original_preflight(cfg, resolved, context=context)
+
+    monkeypatch.setattr(mkbrr_wizard, "preflight_unraid_split_share", preflight)
 
     def run(command: Any, *, timeout: int | None = None) -> Any:
         executed.append((command, timeout))
@@ -616,10 +626,57 @@ def test_handle_batch_executes_job_notifies_and_fixes_ownership(
     assert mkbrr_wizard.handle_batch(cfg, "native", executor, notifier) is True
     assert len(executed) == 1
     assert executed[0][0].argv[:2] == ("mkbrr", "create")
+    assert executed[0][0].argv[-2:] == ("--workers", "0")
     assert executed[0][1] == cfg.batch.job_timeout_seconds
     assert owned_paths == [str(output)]
     assert notifications[0].event_type == "batch"
     assert notifications[0].details["elapsed"] >= 0
+    assert preflight_calls == ["batch job 1"]
+
+
+def test_handle_batch_rejects_failed_plan_before_any_execution(
+    tmp_path: Path, mkbrr_wizard: ModuleType, monkeypatch: Any
+) -> None:
+    config_yaml, _, _, _, _, content, output = _build_main_batch_test_files(
+        tmp_path, runtime="native", docker_support=False
+    )
+    second_content = tmp_path / "data" / "second.mkv"
+    second_content.write_text("x")
+    second_output = tmp_path / "torrents" / "second.torrent"
+    cfg = mkbrr_wizard.load_config(config_yaml)
+    executions: list[Any] = []
+    confirmations: list[Any] = []
+    monkeypatch.setattr(mkbrr_wizard, "pick_preset", lambda _cfg: "btn")
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "collect_batch_jobs_interactive",
+        lambda _cfg: {
+            "version": 1,
+            "jobs": [
+                {"path": str(content), "output": str(output)},
+                {"path": str(second_content), "output": str(second_output)},
+            ],
+        },
+    )
+
+    def preflight(_cfg: Any, resolved: Any, *, context: str) -> Any:
+        if context == "batch job 2":
+            raise ValueError("split-share mismatch")
+        return resolved
+
+    def confirm(*_args: Any, **_kwargs: Any) -> bool:
+        confirmations.append(True)
+        return True
+
+    monkeypatch.setattr(mkbrr_wizard, "preflight_unraid_split_share", preflight)
+    monkeypatch.setattr(mkbrr_wizard, "confirm_cmd", confirm)
+    executor = SimpleNamespace(run=lambda *args, **kwargs: executions.append((args, kwargs)))
+    notifier = SimpleNamespace(notify=lambda _event: None)
+
+    assert mkbrr_wizard.handle_batch(cfg, "native", executor, notifier) is False
+
+    assert confirmations == []
+    assert executions == []
 
 
 def test_main_batch_success_native(tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:
@@ -801,6 +858,7 @@ def test_main_batch_validation_failure_skips_execution(
     monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", _Seq(["4", "1", "q"]))
     out_a = tmp_path / "a.torrent"
     in_a = tmp_path / "a.mkv"
+    in_a.write_text("x")
     monkeypatch.setattr(
         mkbrr_wizard,
         "collect_batch_jobs_interactive",
@@ -907,6 +965,7 @@ def test_main_batch_nonzero_exit_skips_chown(
     monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", _Seq(["4", "1", "q"]))
     out_a = tmp_path / "a.torrent"
     in_a = tmp_path / "a.mkv"
+    in_a.write_text("x")
     monkeypatch.setattr(
         mkbrr_wizard,
         "collect_batch_jobs_interactive",
@@ -949,6 +1008,8 @@ def test_main_batch_continue_on_error_and_chown_once(
     in_a = tmp_path / "a.mkv"
     out_b = tmp_path / "b.torrent"
     in_b = tmp_path / "b.mkv"
+    in_a.write_text("x")
+    in_b.write_text("x")
     monkeypatch.setattr(
         mkbrr_wizard,
         "collect_batch_jobs_interactive",
@@ -1006,6 +1067,8 @@ def test_main_batch_timeout_marks_failed_and_continues(
     in_a = tmp_path / "a.mkv"
     out_b = tmp_path / "b.torrent"
     in_b = tmp_path / "b.mkv"
+    in_a.write_text("x")
+    in_b.write_text("x")
     monkeypatch.setattr(
         mkbrr_wizard,
         "collect_batch_jobs_interactive",

@@ -1,11 +1,52 @@
 """Integration-style tests for main() control flow (simulate user interactions)."""
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Protocol, cast
 
 import pytest  # type: ignore[import-untyped]
 
 from .conftest import _Seq
+
+
+class _Command(Protocol):
+    argv: tuple[str, ...]
+
+
+class _Notification(Protocol):
+    event_type: str
+    details: Mapping[str, object]
+
+
+class _HandlerConfig(Protocol):
+    chown: bool
+
+
+@dataclass(frozen=True)
+class _Execution:
+    returncode: int
+    elapsed: float
+
+
+@dataclass
+class _RecordingExecutor:
+    elapsed: float
+    commands: list[_Command] = field(default_factory=list)
+
+    def run(self, command: _Command, *, timeout: int | None = None) -> _Execution:
+        del timeout
+        self.commands.append(command)
+        return _Execution(returncode=0, elapsed=self.elapsed)
+
+
+@dataclass
+class _RecordingNotifier:
+    events: list[_Notification] = field(default_factory=list)
+
+    def notify(self, event: _Notification) -> None:
+        self.events.append(event)
 
 
 def _mk_args(config_path: str) -> SimpleNamespace:
@@ -13,7 +54,7 @@ def _mk_args(config_path: str) -> SimpleNamespace:
 
 
 @pytest.fixture
-def native_handler_cfg(tmp_path, mkbrr_wizard: ModuleType) -> Any:
+def native_handler_cfg(tmp_path: Path, mkbrr_wizard: ModuleType) -> _HandlerConfig:
     config_yaml = tmp_path / "config.yaml"
     config_yaml.write_text(
         f"""
@@ -29,36 +70,59 @@ paths:
   container_config_dir: /root/.config/mkbrr
 """
     )
-    return mkbrr_wizard.load_config(config_yaml)
+    return cast(_HandlerConfig, mkbrr_wizard.load_config(config_yaml))
 
 
 def test_handle_inspect_uses_executor_and_notifies(
-    mkbrr_wizard: ModuleType, monkeypatch: Any, native_handler_cfg: Any
+    tmp_path: Path,
+    mkbrr_wizard: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    native_handler_cfg: _HandlerConfig,
 ) -> None:
-    executed: list[Any] = []
-    notifications: list[Any] = []
-    monkeypatch.setattr(mkbrr_wizard, "ask_path", lambda *args, **kwargs: "/torrents/test.torrent")
-    monkeypatch.setattr(mkbrr_wizard, "ask_verbose", lambda mode: True)
-    monkeypatch.setattr(mkbrr_wizard, "confirm_cmd", lambda *args, **kwargs: True)
+    torrent_path = tmp_path / "test.torrent"
+    torrent_path.write_text("torrent")
+    monkeypatch.setattr(mkbrr_wizard, "ask_path", lambda *_args, **_kwargs: str(torrent_path))
+    monkeypatch.setattr(mkbrr_wizard, "ask_verbose", lambda _mode: True)
+    monkeypatch.setattr(mkbrr_wizard, "confirm_cmd", lambda *_args, **_kwargs: True)
 
-    def run(command: Any) -> Any:
-        executed.append(command)
-        return mkbrr_wizard.ExecutionResult(returncode=0, elapsed=1.5)
-
-    executor = SimpleNamespace(run=run)
-    notifier = SimpleNamespace(notify=notifications.append)
+    executor = _RecordingExecutor(elapsed=1.5)
+    notifier = _RecordingNotifier()
 
     assert mkbrr_wizard.handle_inspect(native_handler_cfg, "native", executor, notifier) is True
 
-    assert len(executed) == 1
-    assert executed[0].argv == ("mkbrr", "inspect", "/torrents/test.torrent", "-v")
-    assert len(notifications) == 1
-    assert notifications[0].event_type == "inspect"
-    assert notifications[0].details["elapsed"] == 1.5
+    assert len(executor.commands) == 1
+    assert executor.commands[0].argv == ("mkbrr", "inspect", str(torrent_path), "-v")
+    assert len(notifier.events) == 1
+    assert notifier.events[0].event_type == "inspect"
+    assert notifier.events[0].details["elapsed"] == 1.5
+
+
+def test_handle_inspect_rejects_missing_native_torrent(
+    tmp_path: Path,
+    mkbrr_wizard: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    native_handler_cfg: _HandlerConfig,
+) -> None:
+    missing_torrent = tmp_path / "missing.torrent"
+    monkeypatch.setattr(
+        mkbrr_wizard,
+        "ask_path",
+        lambda *_args, **_kwargs: str(missing_torrent),
+    )
+    executor = _RecordingExecutor(elapsed=1.5)
+    notifier = _RecordingNotifier()
+
+    assert mkbrr_wizard.handle_inspect(native_handler_cfg, "native", executor, notifier) is False
+
+    assert executor.commands == []
+    assert notifier.events == []
 
 
 def test_handle_check_uses_executor_and_notifies(
-    tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any, native_handler_cfg: Any
+    tmp_path: Path,
+    mkbrr_wizard: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    native_handler_cfg: _HandlerConfig,
 ) -> None:
     content_path = tmp_path / "data" / "movie.mkv"
     content_path.parent.mkdir()
@@ -66,29 +130,23 @@ def test_handle_check_uses_executor_and_notifies(
     torrent_path = tmp_path / "torrents" / "movie.torrent"
     torrent_path.parent.mkdir()
     torrent_path.write_text("torrent")
-    executed: list[Any] = []
-    notifications: list[Any] = []
     monkeypatch.setattr(
         mkbrr_wizard,
         "ask_path",
         _Seq([str(torrent_path), str(content_path)]),
     )
-    monkeypatch.setattr(mkbrr_wizard, "ask_verbose", lambda mode: False)
+    monkeypatch.setattr(mkbrr_wizard, "ask_verbose", lambda _mode: False)
     monkeypatch.setattr(mkbrr_wizard, "ask_quiet", lambda: False)
     monkeypatch.setattr(mkbrr_wizard, "ask_workers", lambda: 2)
-    monkeypatch.setattr(mkbrr_wizard, "confirm_cmd", lambda *args, **kwargs: True)
+    monkeypatch.setattr(mkbrr_wizard, "confirm_cmd", lambda *_args, **_kwargs: True)
 
-    def run(command: Any) -> Any:
-        executed.append(command)
-        return mkbrr_wizard.ExecutionResult(returncode=0, elapsed=2.5)
-
-    executor = SimpleNamespace(run=run)
-    notifier = SimpleNamespace(notify=notifications.append)
+    executor = _RecordingExecutor(elapsed=2.5)
+    notifier = _RecordingNotifier()
 
     assert mkbrr_wizard.handle_check(native_handler_cfg, "native", executor, notifier) is True
 
-    assert len(executed) == 1
-    assert executed[0].argv == (
+    assert len(executor.commands) == 1
+    assert executor.commands[0].argv == (
         "mkbrr",
         "check",
         str(torrent_path),
@@ -96,44 +154,84 @@ def test_handle_check_uses_executor_and_notifies(
         "--workers",
         "2",
     )
-    assert len(notifications) == 1
-    assert notifications[0].event_type == "check"
-    assert notifications[0].details["elapsed"] == 2.5
+    assert len(notifier.events) == 1
+    assert notifier.events[0].event_type == "check"
+    assert notifier.events[0].details["elapsed"] == 2.5
 
 
 def test_handle_create_uses_executor_and_notifies(
-    tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any, native_handler_cfg: Any
+    tmp_path: Path,
+    mkbrr_wizard: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    native_handler_cfg: _HandlerConfig,
 ) -> None:
     content_path = tmp_path / "data" / "movie.mkv"
     content_path.parent.mkdir()
     content_path.write_text("x")
-    executed: list[Any] = []
-    notifications: list[Any] = []
-    monkeypatch.setattr(mkbrr_wizard, "pick_preset", lambda cfg: "scene")
-    monkeypatch.setattr(mkbrr_wizard, "ask_path", lambda *args, **kwargs: str(content_path))
-    monkeypatch.setattr(mkbrr_wizard, "scan_episodes", lambda path: [])
-    monkeypatch.setattr(mkbrr_wizard, "detect_storage_type", lambda *args, **kwargs: "ssd")
-    monkeypatch.setattr(mkbrr_wizard, "resolve_workers", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mkbrr_wizard, "confirm_cmd", lambda *args, **kwargs: True)
-
-    def run(command: Any) -> Any:
-        executed.append(command)
-        return mkbrr_wizard.ExecutionResult(returncode=0, elapsed=3.5)
-
-    executor = SimpleNamespace(run=run)
-    notifier = SimpleNamespace(notify=notifications.append)
+    monkeypatch.setattr(mkbrr_wizard, "pick_preset", lambda _cfg: "scene")
+    monkeypatch.setattr(mkbrr_wizard, "ask_path", lambda *_args, **_kwargs: str(content_path))
+    monkeypatch.setattr(mkbrr_wizard, "scan_episodes", lambda _path: [])
+    monkeypatch.setattr(mkbrr_wizard, "detect_storage_type", lambda *_args, **_kwargs: "ssd")
+    monkeypatch.setattr(mkbrr_wizard, "resolve_workers", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(mkbrr_wizard, "confirm_cmd", lambda *_args, **_kwargs: True)
+    executor = _RecordingExecutor(elapsed=3.5)
+    notifier = _RecordingNotifier()
 
     assert mkbrr_wizard.handle_create(native_handler_cfg, "native", executor, notifier) is True
 
-    assert len(executed) == 1
-    assert executed[0].argv[:5] == ("mkbrr", "create", str(content_path), "-P", "scene")
-    assert len(notifications) == 1
-    assert notifications[0].event_type == "create"
-    assert notifications[0].details["elapsed"] == 3.5
+    assert len(executor.commands) == 1
+    assert executor.commands[0].argv[:5] == ("mkbrr", "create", str(content_path), "-P", "scene")
+    assert "--output-dir" in executor.commands[0].argv
+    assert "--workers" in executor.commands[0].argv
+    assert executor.commands[0].argv[-2:] == ("--workers", "0")
+    assert len(notifier.events) == 1
+    assert notifier.events[0].event_type == "create"
+    assert notifier.events[0].details["elapsed"] == 3.5
+
+
+def test_handle_split_series_rejects_preset_include_patterns(
+    tmp_path: Path,
+    mkbrr_wizard: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    native_handler_cfg: _HandlerConfig,
+) -> None:
+    presets_dir = tmp_path / "cfg"
+    presets_dir.mkdir()
+    (presets_dir / "presets.yaml").write_text(
+        "default:\n  include_patterns:\n    - '*.mkv'\npresets:\n  scene: {}\n"
+    )
+    monkeypatch.setattr(
+        mkbrr_wizard.Prompt,
+        "ask",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("range prompt should not run")
+        ),
+    )
+    executor = _RecordingExecutor(elapsed=1.0)
+    notifier = _RecordingNotifier()
+
+    assert (
+        mkbrr_wizard.handle_split_series(
+            native_handler_cfg,
+            "native",
+            executor,
+            notifier,
+            preset="scene",
+            raw=str(tmp_path / "data" / "Show.S01"),
+            content_path=str(tmp_path / "data" / "Show.S01"),
+            host_data_root_override=None,
+            episodes=[((1, 1), "Show.S01E01.mkv"), ((1, 2), "Show.S01E02.mkv")],
+            episode_keys=[(1, 1), (1, 2)],
+        )
+        is False
+    )
+
+    assert executor.commands == []
+    assert notifier.events == []
 
 
 def test_main_create_inspect_check_native(
-    tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
+    tmp_path: Path, mkbrr_wizard: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Prepare config directory and presets
     config_dir = tmp_path / "cfg"
@@ -173,7 +271,7 @@ presets_yaml: {presets_yaml}
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
 
     # Force runtime to native
-    monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")
+    monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda _cfg, _forced: "native")
 
     # Sequence of Prompt.ask responses:
     # 1 -> choose_action create
@@ -212,14 +310,14 @@ presets_yaml: {presets_yaml}
         def __init__(self, returncode=0):
             self.returncode = returncode
 
-    monkeypatch.setattr(mkbrr_wizard.subprocess, "run", lambda *a, **k: Dummy(0))
+    monkeypatch.setattr(mkbrr_wizard.subprocess, "run", lambda *_args, **_kwargs: Dummy(0))
 
     # Now run main() -- should finish without errors
     mkbrr_wizard.main()
 
 
 def test_main_docker_mode_build_and_exit(
-    tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any
+    tmp_path: Path, mkbrr_wizard: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # simple docker-mode check: main should build docker commands and exit
     config_yaml = tmp_path / "config.yaml"
@@ -243,19 +341,19 @@ presets_yaml: presets.yaml
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
     # Force docker runtime selection
-    monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "docker")
+    monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda _cfg, _forced: "docker")
 
     # simulate minimal user flow: choose inspect then quit
     seq = _Seq(["2", "/torrentfiles/test.torrent"])
     monkeypatch.setattr(mkbrr_wizard, "_has_prompt_toolkit", False)
     monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", seq)
-    monkeypatch.setattr(mkbrr_wizard.Confirm, "ask", lambda *a, **k: False)
+    monkeypatch.setattr(mkbrr_wizard.Confirm, "ask", lambda *_args, **_kwargs: False)
 
     # don't actually invoke docker; patch subprocess.run
     class Dummy:
         def __init__(self, returncode=0):
             self.returncode = returncode
 
-    monkeypatch.setattr(mkbrr_wizard.subprocess, "run", lambda *a, **k: Dummy(0))
+    monkeypatch.setattr(mkbrr_wizard.subprocess, "run", lambda *_args, **_kwargs: Dummy(0))
 
     mkbrr_wizard.main()

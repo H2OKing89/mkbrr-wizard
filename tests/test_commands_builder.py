@@ -51,6 +51,25 @@ def test_build_create_command_native(mkbrr_wizard: ModuleType) -> None:
     assert spec.cwd == cfg.paths.host_output_dir
 
 
+@pytest.mark.parametrize(
+    ("runtime", "expected_output_dir"),
+    [
+        pytest.param("native", "/mnt/user/data/downloads/torrents/torrentfiles", id="native"),
+        pytest.param("docker", "/torrentfiles", id="docker"),
+    ],
+)
+def test_build_create_command_overrides_preset_output_dir(
+    mkbrr_wizard: ModuleType, runtime: str, expected_output_dir: str
+) -> None:
+    cfg = sample_cfg(mkbrr_wizard)
+    content_path = "/data/file.mkv" if runtime == "docker" else "/mnt/user/data/file.mkv"
+
+    spec = mkbrr_wizard.build_create_command(cfg, runtime, content_path, "btn")
+
+    output_dir_index = spec.argv.index("--output-dir")
+    assert spec.argv[output_dir_index + 1] == expected_output_dir
+
+
 def test_command_spec_with_args_returns_new_value(mkbrr_wizard: ModuleType) -> None:
     spec = mkbrr_wizard.CommandSpec(argv=("mkbrr", "create"), cwd="working-directory")
 
@@ -137,12 +156,14 @@ def test_command_executor_maps_launch_error_to_exit_code(
 def test_docker_backend_kills_named_container_on_timeout(
     mkbrr_wizard: ModuleType, monkeypatch: Any
 ) -> None:
-    calls: list[tuple[str, ...]] = []
+    calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
 
     def run(command: tuple[str, ...], **kwargs: Any) -> Any:
-        calls.append(command)
+        calls.append((command, kwargs))
         if command[:2] == ("docker", "run"):
             raise subprocess.TimeoutExpired(cmd=command, timeout=10)
+        if command[:2] == ("docker", "kill"):
+            raise subprocess.TimeoutExpired(cmd=command, timeout=5)
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(mkbrr_wizard.subprocess, "run", run)
@@ -156,8 +177,8 @@ def test_docker_backend_kills_named_container_on_timeout(
     assert result.returncode == 124
     assert result.timed_out is True
     assert calls == [
-        command.argv,
-        ("docker", "kill", "mkbrr-wizard-test"),
+        (command.argv, {"cwd": None, "check": False, "timeout": 10}),
+        (("docker", "kill", "mkbrr-wizard-test"), {"check": False, "timeout": 5}),
     ]
 
 

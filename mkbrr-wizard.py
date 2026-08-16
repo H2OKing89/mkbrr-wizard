@@ -38,7 +38,15 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 try:
-    from pydantic import BaseModel, ConfigDict, Field, ValidationError
+    from pydantic import (
+        BaseModel,
+        ConfigDict,
+        Field,
+        ValidationError,
+        computed_field,
+        field_validator,
+        model_validator,
+    )
 except ImportError as e:
     print("❌ pydantic is not installed. Install it with:\n   pip install 'pydantic>=2.7,<3'")
     raise SystemExit(1) from e
@@ -126,7 +134,7 @@ DEFAULT_MKBRR_IMAGE = f"ghcr.io/autobrr/mkbrr:v{MKBRR_TESTED_VERSION}"
 # ----------------------------
 
 
-def _coerce_bool(v: Any, default: bool) -> Any:
+def _coerce_bool(v: Any) -> Any:
     if isinstance(v, bool):
         return v
     if isinstance(v, int | float):
@@ -157,6 +165,16 @@ class _PathsInput(_StrictConfigModel):
     host_config_dir: str = "/mnt/cache/appdata/mkbrr"
     container_config_dir: str = "/root/.config/mkbrr"
 
+    @field_validator("host_data_root", "host_output_dir", "host_config_dir")
+    @classmethod
+    def _expand_host_path(cls, value: str) -> str:
+        return _expand_path(value).rstrip("/")
+
+    @field_validator("container_data_root", "container_output_dir", "container_config_dir")
+    @classmethod
+    def _normalize_container_path(cls, value: str) -> str:
+        return value.strip().rstrip("/")
+
 
 class _OwnershipInput(_StrictConfigModel):
     uid: int = 99
@@ -179,9 +197,24 @@ class _UnraidInput(_StrictConfigModel):
 
 
 class _WorkersInput(_StrictConfigModel):
-    hdd: int | str | None = 1
-    ssd: int | str | None = "auto"
-    default: int | str | None = "auto"
+    hdd: int | None = 1
+    ssd: int | None = None
+    default: int | None = None
+
+    @field_validator("hdd", "ssd", "default", mode="before")
+    @classmethod
+    def _normalize_workers(cls, value: Any, info: Any) -> int | None | Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.strip().lower()
+            if value in ("auto", ""):
+                return None
+            with contextlib.suppress(ValueError):
+                value = int(value)
+        if isinstance(value, int) and value > 0:
+            return value
+        raise ValueError(f"workers.{info.field_name} must be a positive integer or 'auto'")
 
 
 class _PushoverInput(_StrictConfigModel):
@@ -226,7 +259,45 @@ class _AppConfigInput(_StrictConfigModel):
     presets_yaml: str = "presets.yaml"
 
 
-_LEGACY_TURE_PATHS = (
+MkbrrCfg = _MkbrrInput
+PathsCfg = _PathsInput
+OwnershipCfg = _OwnershipInput
+BatchCfg = _BatchInput
+UnraidCfg = _UnraidInput
+WorkersCfg = _WorkersInput
+PushoverCfg = _PushoverInput
+DiscordCfg = _DiscordInput
+NotificationsCfg = _NotificationsInput
+
+
+class AppCfg(_AppConfigInput):
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_derived_preset_fields(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        raw = dict(value)
+        presets_host = raw.pop("presets_yaml_host", None)
+        raw.pop("presets_yaml_container", None)
+        if "presets_yaml" not in raw and presets_host:
+            raw["presets_yaml"] = presets_host
+        return raw
+
+    @computed_field  # type: ignore[prop-decorator, misc]
+    @property
+    def presets_yaml_host(self) -> str:
+        presets_yaml = _expand_path(self.presets_yaml)
+        if os.path.isabs(presets_yaml):
+            return presets_yaml
+        return str(Path(self.paths.host_config_dir) / self.presets_yaml)
+
+    @computed_field  # type: ignore[prop-decorator, misc]
+    @property
+    def presets_yaml_container(self) -> str:
+        return str(Path(self.paths.container_config_dir) / Path(self.presets_yaml_host).name)
+
+
+_LEGACY_BOOL_PATHS = (
     ("docker_support",),
     ("chown",),
     ("unraid", "enabled"),
@@ -234,16 +305,6 @@ _LEGACY_TURE_PATHS = (
     ("notifications", "enabled"),
     ("notifications", "pushover", "enabled"),
     ("notifications", "discord", "enabled"),
-)
-
-_LEGACY_BOOL_PATHS = (
-    (("docker_support",), True),
-    (("chown",), True),
-    (("unraid", "enabled"), False),
-    (("unraid", "split_share_follow_symlinks"), False),
-    (("notifications", "enabled"), False),
-    (("notifications", "pushover", "enabled"), False),
-    (("notifications", "discord", "enabled"), False),
 )
 
 _LEGACY_INT_PATHS = (
@@ -271,7 +332,7 @@ def _resolve_config_path(
 
 def _migrate_legacy_ture(raw: dict[str, Any]) -> None:
     migrated_paths: list[str] = []
-    for path_parts in _LEGACY_TURE_PATHS:
+    for path_parts in _LEGACY_BOOL_PATHS:
         resolved = _resolve_config_path(raw, path_parts)
         if resolved is None:
             continue
@@ -303,13 +364,13 @@ def _normalize_null_config_sections(raw: dict[str, Any]) -> None:
 
 
 def _normalize_legacy_config_scalars(raw: dict[str, Any]) -> None:
-    for path_parts, default in _LEGACY_BOOL_PATHS:
+    for path_parts in _LEGACY_BOOL_PATHS:
         resolved = _resolve_config_path(raw, path_parts)
         if resolved is None:
             continue
         node, field_name = resolved
         if field_name in node:
-            node[field_name] = _coerce_bool(node[field_name], default)
+            node[field_name] = _coerce_bool(node[field_name])
 
     for path_parts in _LEGACY_INT_PATHS:
         resolved = _resolve_config_path(raw, path_parts)
@@ -317,7 +378,7 @@ def _normalize_legacy_config_scalars(raw: dict[str, Any]) -> None:
             continue
         node, field_name = resolved
         value = node.get(field_name)
-        if value is None:
+        if value is None or isinstance(value, bool):
             continue
         if isinstance(value, float) and not value.is_integer():
             continue
@@ -357,101 +418,6 @@ def _clean_user_path(s: str) -> str:
         s = s[1:-1].strip()
 
     return _expand_path(s)
-
-
-@dataclass(frozen=True)
-class PathsCfg:
-    host_data_root: str
-    container_data_root: str
-    host_output_dir: str
-    container_output_dir: str
-    host_config_dir: str
-    container_config_dir: str
-
-
-@dataclass(frozen=True)
-class OwnershipCfg:
-    uid: int
-    gid: int
-
-
-@dataclass(frozen=True)
-class MkbrrCfg:
-    binary: str
-    image: str
-
-
-@dataclass(frozen=True)
-class BatchCfg:
-    mode: str  # simple|advanced
-    job_timeout_seconds: int | None = None
-
-
-@dataclass(frozen=True)
-class UnraidCfg:
-    enabled: bool = False
-    fuse_root: str = "/mnt/user"
-    mount_priority: str = "disk_first"  # disk_first|cache_first
-    split_share_preflight: str = "fail"  # off|warn|fail
-    split_share_unmapped_docker_path: str = "warn"  # off|warn|fail
-    split_share_max_entries: int = 20000
-    split_share_follow_symlinks: bool = False
-
-
-@dataclass(frozen=True)
-class WorkersCfg:
-    hdd: int | None = 1  # --workers value for spinning disks (None = auto)
-    ssd: int | None = None  # --workers value for SSDs/NVMe (None = auto)
-    default: int | None = None  # fallback when storage type can't be determined
-
-
-@dataclass(frozen=True)
-class PushoverCfg:
-    enabled: bool = False
-    app_token: str = ""
-    user_key: str = ""
-    priority: int = 0  # -2 to 2
-    failure_priority: int = 1
-    device: str = ""
-
-
-@dataclass(frozen=True)
-class DiscordCfg:
-    enabled: bool = False
-    webhook_url: str = ""
-    username: str = "mkbrr-wizard"
-    avatar_url: str = ""
-    color_success: int = 0x2ECC71
-    color_failure: int = 0xE74C3C
-    color_partial: int = 0xF39C12
-
-
-@dataclass(frozen=True)
-class NotificationsCfg:
-    enabled: bool = False
-    policy: str = "summary"  # summary|failures_only|off
-    pushover: PushoverCfg = field(default_factory=PushoverCfg)
-    discord: DiscordCfg = field(default_factory=DiscordCfg)
-    timeout_seconds: int = 10
-
-
-@dataclass(frozen=True)
-class AppCfg:
-    runtime: str  # auto|docker|native
-    docker_support: bool
-    chown: bool
-    docker_user: str | None
-
-    mkbrr: MkbrrCfg
-    paths: PathsCfg
-    ownership: OwnershipCfg
-    batch: BatchCfg
-
-    presets_yaml_host: str  # absolute host path to presets.yaml
-    presets_yaml_container: str  # container path to presets.yaml (docker runtime)
-    unraid: UnraidCfg = field(default_factory=UnraidCfg)
-    notifications: NotificationsCfg = field(default_factory=NotificationsCfg)
-    workers: WorkersCfg = field(default_factory=WorkersCfg)
 
 
 @dataclass(frozen=True)
@@ -572,8 +538,8 @@ class DockerBackend(_SubprocessBackend):
             try:
                 name_index = command.argv.index("--name")
                 container_name = command.argv[name_index + 1]
-                subprocess.run(("docker", "kill", container_name), check=False)
-            except (IndexError, OSError, ValueError):
+                subprocess.run(("docker", "kill", container_name), check=False, timeout=5)
+            except (IndexError, OSError, ValueError, subprocess.TimeoutExpired):
                 pass
             raise
 
@@ -648,14 +614,16 @@ def load_config(path: Path) -> AppCfg:
         raw = cast(dict[str, Any], _AppConfigInput.model_validate(raw).model_dump())
     except ValidationError as e:
         errors = e.errors(include_url=False, include_input=False)
-        raise ValueError(f"Invalid configuration:\n{json.dumps(errors, indent=2)}") from e
+        raise ValueError(
+            f"Invalid configuration:\n{json.dumps(errors, indent=2, default=str)}"
+        ) from e
 
     runtime = str(raw.get("runtime", "auto")).strip().lower()
     if runtime not in ("auto", "docker", "native"):
         raise ValueError("runtime must be one of: auto, docker, native")
 
-    docker_support = _coerce_bool(raw.get("docker_support", True), True)
-    chown = _coerce_bool(raw.get("chown", True), True)
+    docker_support = _coerce_bool(raw.get("docker_support", True))
+    chown = _coerce_bool(raw.get("chown", True))
     docker_user = raw.get("docker_user")
     docker_user = str(docker_user).strip() if docker_user else None
 
@@ -726,14 +694,14 @@ def load_config(path: Path) -> AppCfg:
         raise ValueError("unraid.split_share_max_entries must be a positive integer")
 
     unraid = UnraidCfg(
-        enabled=_coerce_bool(unraid_node.get("enabled", False), False),
+        enabled=_coerce_bool(unraid_node.get("enabled", False)),
         fuse_root=_expand_path(str(unraid_node.get("fuse_root", "/mnt/user"))).rstrip("/"),
         mount_priority=mount_priority,
         split_share_preflight=preflight_mode,
         split_share_unmapped_docker_path=unmapped_docker_path_mode,
         split_share_max_entries=split_share_max_entries,
         split_share_follow_symlinks=_coerce_bool(
-            unraid_node.get("split_share_follow_symlinks", False), False
+            unraid_node.get("split_share_follow_symlinks", False)
         ),
     )
 
@@ -748,12 +716,9 @@ def load_config(path: Path) -> AppCfg:
     else:
         presets_host = str(Path(paths.host_config_dir) / presets_yaml_raw)
 
-    # In docker, we expect presets.yaml to be available under container_config_dir
-    presets_container = str(Path(paths.container_config_dir) / Path(presets_host).name)
-
     # ---- notifications ----
     notif_node: dict[str, Any] = cast(dict[str, Any], raw.get("notifications") or {})
-    notif_enabled = _coerce_bool(notif_node.get("enabled", False), False)
+    notif_enabled = _coerce_bool(notif_node.get("enabled", False))
 
     notif_policy = str(notif_node.get("policy", "summary")).strip().lower()
     if notif_policy not in ("summary", "failures_only", "off"):
@@ -773,7 +738,7 @@ def load_config(path: Path) -> AppCfg:
             )
 
     pushover = PushoverCfg(
-        enabled=_coerce_bool(po_node.get("enabled", False), False),
+        enabled=_coerce_bool(po_node.get("enabled", False)),
         app_token=_expand_env(str(po_node.get("app_token", ""))),
         user_key=_expand_env(str(po_node.get("user_key", ""))),
         priority=pushover_priority,
@@ -794,7 +759,7 @@ def load_config(path: Path) -> AppCfg:
         discord_color_partial = int(discord_color_partial, 0)
 
     discord = DiscordCfg(
-        enabled=_coerce_bool(dc_node.get("enabled", False), False),
+        enabled=_coerce_bool(dc_node.get("enabled", False)),
         webhook_url=_expand_env(str(dc_node.get("webhook_url", ""))),
         username=str(dc_node.get("username", "mkbrr-wizard")).strip(),
         avatar_url=str(dc_node.get("avatar_url", "")).strip(),
@@ -843,8 +808,7 @@ def load_config(path: Path) -> AppCfg:
         paths=paths,
         ownership=ownership,
         batch=batch,
-        presets_yaml_host=presets_host,
-        presets_yaml_container=presets_container,
+        presets_yaml=presets_host,
         unraid=unraid,
         notifications=notifications,
         workers=workers_cfg,
@@ -1307,15 +1271,7 @@ class ResolvedContent:
     host_path: str
     fuse_host_path: str
     host_mount_override: str | None
-    storage_device: str
     used_fuse_fallback: bool = False
-
-
-def _storage_device(path: str) -> str:
-    match = re.match(r"^/mnt/(disk\d+|cache(?:-.+)?)(?:/|$)", path)
-    if match:
-        return match.group(1)
-    return "fuse" if path.startswith("/mnt/user") else "unknown"
 
 
 def _resolved_content_for_host_path(
@@ -1356,7 +1312,6 @@ def _resolved_content_for_host_path(
         host_path=host_path,
         fuse_host_path=fuse_host_path,
         host_mount_override=host_mount_override,
-        storage_device=_storage_device(host_path),
         used_fuse_fallback=used_fuse_fallback,
     )
 
@@ -1384,7 +1339,6 @@ def resolve_unraid_content_path(cfg: AppCfg, runtime: str, raw: str) -> Resolved
             host_path=fuse_host_path,
             fuse_host_path=fuse_host_path,
             host_mount_override=None,
-            storage_device=_storage_device(fuse_host_path),
         )
 
     resolved_host = resolve_unraid_disk_path(cfg, fuse_host_path)
@@ -1657,6 +1611,11 @@ def parse_split_ranges(input_str: str, available: list[EpisodeKey]) -> list[list
             raise ValueError(f"Range {lo}-{hi} contains no episodes found in folder")
         parts.append([(season, episode) for episode in part_numbers])
 
+    assigned = {episode_key for part in parts for episode_key in part}
+    omitted = sorted(set(available) - assigned)
+    if omitted:
+        raise ValueError(f"Split ranges omit episode(s): {format_episode_ranges(omitted)}")
+
     return parts
 
 
@@ -1778,6 +1737,10 @@ def build_create_command(
             cfg.presets_yaml_host,
         ]
         cwd = cfg.paths.host_output_dir
+    output_dir = (
+        cfg.paths.container_output_dir if runtime == "docker" else cfg.paths.host_output_dir
+    )
+    cmd += ["--output-dir", output_dir]
     return CommandSpec(argv=tuple(cmd), cwd=cwd)
 
 
@@ -2001,6 +1964,34 @@ def load_presets(host_presets_yaml: str) -> list[str]:
     if "btn" in presets:
         presets = ["btn"] + [x for x in presets if x != "btn"]
     return presets
+
+
+def preset_include_patterns(host_presets_yaml: str, preset: str) -> tuple[str, ...]:
+    """Return include patterns inherited by *preset* from its defaults and definition."""
+    preset_path = Path(host_presets_yaml)
+    if not preset_path.exists():
+        return ()
+
+    loaded = yaml.safe_load(preset_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, Mapping):
+        return ()
+
+    patterns: list[str] = []
+    presets_node = loaded.get("presets")
+    preset_node = presets_node.get(preset) if isinstance(presets_node, Mapping) else None
+    for node in (loaded.get("default"), preset_node):
+        if not isinstance(node, Mapping):
+            continue
+        include_patterns = node.get("include_patterns")
+        if isinstance(include_patterns, list):
+            patterns.extend(
+                pattern.strip()
+                for pattern in include_patterns
+                if isinstance(pattern, str) and pattern.strip()
+            )
+        elif include_patterns:
+            patterns.append("<invalid include_patterns setting>")
+    return tuple(patterns)
 
 
 def pick_preset(cfg: AppCfg) -> str:
@@ -2815,21 +2806,15 @@ class NotificationManager:
             drain_future.result(timeout=timeout)
         except RuntimeError:
             drain_coro.close()
-            try:
+            with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(loop.stop)
-            except RuntimeError:
-                pass
         except TimeoutError:
             drain_future.cancel()
-            try:
+            with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(loop.stop)
-            except RuntimeError:
-                pass
         finally:
-            try:
+            with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(loop.stop)
-            except RuntimeError:
-                pass
             thread.join(timeout=timeout)
             if not thread.is_alive():
                 loop.close()
@@ -2871,27 +2856,33 @@ class JobBatchRun:
     elapsed: float
 
 
-def run_job_batch(
+def _validate_planned_job_paths(
+    cfg: AppCfg, resolved_content: ResolvedContent, job: BatchJob
+) -> None:
+    if not os.path.exists(resolved_content.host_path):
+        raise ValueError(f"Content path does not exist: {resolved_content.host_path}")
+
+    host_output_path = _host_torrent_output_path(cfg, job.output)
+    output_dir = Path(host_output_path).parent
+    if os.path.exists(host_output_path):
+        raise ValueError(f"Output file already exists: {host_output_path}")
+    if not output_dir.is_dir():
+        raise ValueError(f"Output directory does not exist: {output_dir}")
+    if not os.access(output_dir, os.W_OK):
+        raise ValueError(f"Output directory is not writable: {output_dir}")
+
+
+def plan_job_batch(
     cfg: AppCfg,
-    executor: CommandExecutor,
     jobs: Sequence[BatchJob],
     prepare_job: Callable[[int, BatchJob], PlannedJob | JobResult],
-    *,
-    item_label: str,
-    started: float,
-    show_timeout_limit: bool = False,
-) -> JobBatchRun:
-    succeeded = 0
-    failed = 0
-    results: list[JobResult] = []
+) -> tuple[tuple[PlannedJob, ...], tuple[JobResult, ...]]:
+    plans: list[PlannedJob] = []
+    errors: list[JobResult] = []
     for index, job in enumerate(jobs, 1):
         prepared = prepare_job(index, job)
         if isinstance(prepared, JobResult):
-            results.append(prepared)
-            if prepared.succeeded:
-                succeeded += 1
-            else:
-                failed += 1
+            errors.append(prepared)
             continue
 
         storage_type = detect_storage_type(
@@ -2900,12 +2891,36 @@ def run_job_batch(
             mount_priority=cfg.unraid.mount_priority,
         )
         workers = resolve_workers(storage_type, cfg.workers)
-        command_spec = prepared.command_spec
-        if workers is not None:
-            command_spec = command_spec.with_args("--workers", str(workers))
+        plans.append(
+            replace(
+                prepared,
+                command_spec=prepared.command_spec.with_args("--workers", str(workers or 0)),
+            )
+        )
+    return tuple(plans), tuple(errors)
 
-        execution = executor.run(command_spec, timeout=cfg.batch.job_timeout_seconds)
-        result = JobResult(index, job.path, job.output, execution.returncode)
+
+def render_planning_errors(errors: Sequence[JobResult], *, item_label: str) -> None:
+    console.print(f"[err]❌ {item_label} planning failed; no jobs were executed.[/]")
+    for result in errors:
+        console.print(f"[err]  - {item_label} {result.index}: {result.content_path}[/]")
+
+
+def run_job_batch(
+    cfg: AppCfg,
+    executor: CommandExecutor,
+    plans: Sequence[PlannedJob],
+    *,
+    item_label: str,
+    started: float,
+    show_timeout_limit: bool = False,
+) -> JobBatchRun:
+    succeeded = 0
+    failed = 0
+    results: list[JobResult] = []
+    for plan in plans:
+        execution = executor.run(plan.command_spec, timeout=cfg.batch.job_timeout_seconds)
+        result = JobResult(plan.index, plan.job.path, plan.job.output, execution.returncode)
         results.append(result)
         if execution.timed_out:
             failed += 1
@@ -2914,13 +2929,13 @@ def run_job_batch(
                 if show_timeout_limit and cfg.batch.job_timeout_seconds is not None
                 else ""
             )
-            console.print(f"[err]❌ {item_label} {index} timed out{timeout_message}[/]")
+            console.print(f"[err]❌ {item_label} {plan.index} timed out{timeout_message}[/]")
         elif result.succeeded:
             succeeded += 1
         else:
             failed += 1
             console.print(
-                f"[err]❌ {item_label} {index} failed with exit code {result.exit_code}[/]"
+                f"[err]❌ {item_label} {plan.index} failed with exit code {result.exit_code}[/]"
             )
 
     return JobBatchRun(
@@ -2968,6 +2983,10 @@ def handle_inspect(
         )
     except ValueError as e:
         console.print(f"[err]❌ {e}[/]")
+        return False
+
+    if runtime == "native" and not os.path.isfile(torrent_path):
+        console.print(f"[err]❌ Torrent file not found:[/] {torrent_path}")
         return False
 
     verbose = ask_verbose("inspect")
@@ -3135,29 +3154,6 @@ def handle_batch(
         return False
 
     render_batch_summary(payload)
-    try:
-        preview_content = preflight_unraid_split_share(
-            cfg,
-            resolve_unraid_content_path(cfg, runtime, typed_jobs[0].path),
-            context="batch job 1",
-        )
-        preview_spec = build_batch_job_create_command(
-            cfg,
-            runtime,
-            preset,
-            replace(typed_jobs[0], path=preview_content.runtime_path),
-            host_data_root_override=preview_content.host_mount_override,
-        )
-    except ValueError as e:
-        console.print(f"[err]❌ Invalid batch job: {e}[/]")
-        return False
-    console.print(
-        f"[info]About to run {len(typed_jobs)} batch job(s). Showing first job command preview.[/]"
-    )
-    if not confirm_cmd(preview_spec.argv, cwd=preview_spec.cwd):
-        return False
-
-    started = time.monotonic()
 
     def prepare_batch_job(index: int, job: BatchJob) -> PlannedJob | JobResult:
         try:
@@ -3166,8 +3162,9 @@ def handle_batch(
                 resolve_unraid_content_path(cfg, runtime, job.path),
                 context=f"batch job {index}",
             )
+            _validate_planned_job_paths(cfg, resolved_content, job)
         except ValueError as e:
-            console.print(f"[err]❌ Job {index} preflight failed: {e}[/]")
+            console.print(f"[err]❌ Job {index} planning failed: {e}[/]")
             return JobResult(index, job.path, job.output, 2)
 
         try:
@@ -3184,18 +3181,29 @@ def handle_batch(
 
         return PlannedJob(
             index=index,
-            job=replace(job, path=resolved_content.runtime_path),
+            job=job,
             command_spec=command_spec,
             host_path=resolved_content.host_path,
         )
 
+    plans, planning_errors = plan_job_batch(cfg, typed_jobs, prepare_batch_job)
+    if planning_errors:
+        render_planning_errors(planning_errors, item_label="Job")
+        return False
+
+    preview_spec = plans[0].command_spec
+    console.print(
+        f"[info]About to run {len(plans)} batch job(s). Showing first job command preview.[/]"
+    )
+    if not confirm_cmd(preview_spec.argv, cwd=preview_spec.cwd):
+        return False
+
     summary = run_job_batch(
         cfg,
         executor,
-        typed_jobs,
-        prepare_batch_job,
+        plans,
         item_label="Job",
-        started=started,
+        started=time.monotonic(),
         show_timeout_limit=True,
     )
     render_job_results(summary, title="Batch Results", index_label="#")
@@ -3223,6 +3231,145 @@ def handle_batch(
                 "Batch Complete"
                 if summary.failed == 0
                 else "Batch Failed" if summary.succeeded == 0 else "Batch Partial"
+            ),
+            details={
+                "succeeded": summary.succeeded,
+                "failed": summary.failed,
+                "result_rows": [result.as_tuple() for result in summary.results],
+                "elapsed": summary.elapsed,
+            },
+        )
+    )
+    return True
+
+
+def handle_split_series(
+    cfg: AppCfg,
+    runtime: str,
+    executor: CommandExecutor,
+    notifier: NotificationManager,
+    *,
+    preset: str,
+    raw: str,
+    content_path: str,
+    host_data_root_override: str | None,
+    episodes: list[tuple[EpisodeKey, str]],
+    episode_keys: list[EpisodeKey],
+) -> bool:
+    inherited_include_patterns = preset_include_patterns(cfg.presets_yaml_host, preset)
+    if inherited_include_patterns:
+        console.print(
+            "[err]❌ Split series cannot use a preset with include_patterns because mkbrr "
+            "combines preset and split filters. Remove the preset include_patterns first.[/]"
+        )
+        return False
+
+    while True:
+        range_input = cast(
+            str,
+            Prompt.ask("Enter episode ranges [dim](e.g. 1-11, 12-22)[/]"),
+        )
+        try:
+            parts = parse_split_ranges(range_input, episode_keys)
+            break
+        except ValueError as e:
+            console.print(f"[err]❌ {e}[/]")
+
+    all_patterns: list[list[str]] = []
+    try:
+        for part_eps in parts:
+            all_patterns.append(build_split_include_patterns(episodes, part_eps))
+    except ValueError as e:
+        console.print(f"[err]❌ Split plan invalid: {e}[/]")
+        return False
+
+    output_dir = cfg.paths.host_output_dir
+    folder_name = Path(raw.rstrip("/").rstrip("\\")).name
+    render_split_summary(folder_name, parts, all_patterns, output_dir)
+
+    split_jobs: list[BatchJob] = []
+    for index, (_part_eps, patterns) in enumerate(zip(parts, all_patterns, strict=True), 1):
+        output_name = split_output_name(folder_name, index)
+        host_output_path = str(Path(output_dir) / output_name)
+        output_path = map_torrent_path(cfg, runtime, host_output_path)
+        if output_path == host_output_path:
+            content_fallback = map_content_path(cfg, runtime, host_output_path)
+            if content_fallback != host_output_path:
+                output_path = content_fallback
+        split_jobs.append(
+            BatchJob(
+                path=content_path,
+                output=output_path,
+                include_patterns=tuple(patterns),
+                fail_on_season_warning=False,
+            )
+        )
+
+    def prepare_split_job(index: int, job: BatchJob) -> PlannedJob | JobResult:
+        try:
+            resolved_content = resolve_unraid_content_path(cfg, runtime, job.path)
+            _validate_planned_job_paths(cfg, resolved_content, job)
+            command_spec = build_batch_job_create_command(
+                cfg,
+                runtime,
+                preset,
+                job,
+                host_data_root_override=host_data_root_override,
+            )
+        except ValueError as e:
+            console.print(f"[err]❌ Part {index} invalid: {e}[/]")
+            return JobResult(index, job.path, job.output, 2)
+
+        return PlannedJob(
+            index=index,
+            job=job,
+            command_spec=command_spec,
+            host_path=resolved_content.host_path,
+        )
+
+    plans, planning_errors = plan_job_batch(cfg, split_jobs, prepare_split_job)
+    if planning_errors:
+        render_planning_errors(planning_errors, item_label="Part")
+        return False
+
+    preview_spec = plans[0].command_spec
+    console.print(
+        f"[info]About to run {len(plans)} split-series job(s). "
+        "Showing Part 1 command preview.[/]"
+    )
+    if not confirm_cmd(preview_spec.argv, cwd=preview_spec.cwd):
+        return False
+
+    summary = run_job_batch(
+        cfg,
+        executor,
+        plans,
+        item_label="Part",
+        started=time.monotonic(),
+    )
+    render_job_results(summary, title="Split Series Results", index_label="Part")
+
+    if summary.succeeded > 0:
+        console.print(
+            f"[ok]✅ Split series completed with {summary.succeeded}" f" successful part(s).[/]"
+        )
+        successful_outputs = [
+            _host_torrent_output_path(cfg, result.output_path)
+            for result in summary.results
+            if result.succeeded
+        ]
+        maybe_fix_torrent_permissions(cfg, successful_outputs)
+    else:
+        console.print("[err]❌ Split series failed for all parts.[/]")
+
+    notifier.notify(
+        NotifyEvent(
+            event_type="batch",
+            success=summary.failed == 0,
+            title=(
+                "Split Series Complete"
+                if summary.failed == 0
+                else "Split Series Failed" if summary.succeeded == 0 else "Split Series Partial"
             ),
             details={
                 "succeeded": summary.succeeded,
@@ -3284,144 +3431,18 @@ def handle_create(
         )
         do_split = cast(bool, Confirm.ask("Split this season into parts?", default=False))
         if do_split:
-            while True:
-                range_input = cast(
-                    str,
-                    Prompt.ask("Enter episode ranges [dim](e.g. 1-11, 12-22)[/]"),
-                )
-                try:
-                    parts = parse_split_ranges(range_input, episode_keys)
-                    break
-                except ValueError as e:
-                    console.print(f"[err]❌ {e}[/]")
-
-            all_patterns: list[list[str]] = []
-            try:
-                for part_eps in parts:
-                    all_patterns.append(build_split_include_patterns(episodes, part_eps))
-            except ValueError as e:
-                console.print(f"[err]❌ Split plan invalid: {e}[/]")
-                return False
-
-            output_dir = cfg.paths.host_output_dir
-            folder_name = Path(raw.rstrip("/").rstrip("\\")).name
-            render_split_summary(folder_name, parts, all_patterns, output_dir)
-
-            split_jobs: list[BatchJob] = []
-            for index, (_part_eps, patterns) in enumerate(zip(parts, all_patterns, strict=True), 1):
-                output_name = split_output_name(folder_name, index)
-                host_output_path = str(Path(output_dir) / output_name)
-                output_path = map_torrent_path(cfg, runtime, host_output_path)
-                if output_path == host_output_path:
-                    content_fallback = map_content_path(cfg, runtime, host_output_path)
-                    if content_fallback != host_output_path:
-                        output_path = content_fallback
-                split_jobs.append(
-                    BatchJob(
-                        path=content_path,
-                        output=output_path,
-                        include_patterns=tuple(patterns),
-                        fail_on_season_warning=False,
-                    )
-                )
-
-            try:
-                preview_spec = build_batch_job_create_command(
-                    cfg,
-                    runtime,
-                    preset,
-                    split_jobs[0],
-                    host_data_root_override=host_data_root_override,
-                )
-            except ValueError as e:
-                console.print(f"[err]❌ {e}[/]")
-                return False
-
-            console.print(
-                f"[info]About to run {len(split_jobs)} split-series job(s). "
-                "Showing Part 1 command preview.[/]"
-            )
-            if not confirm_cmd(preview_spec.argv, cwd=preview_spec.cwd):
-                return False
-
-            split_started = time.monotonic()
-
-            def prepare_split_job(
-                index: int,
-                job: BatchJob,
-                *,
-                split_preset: str = preset,
-                split_raw: str = raw,
-                split_host_data_root_override: str | None = host_data_root_override,
-            ) -> PlannedJob | JobResult:
-                try:
-                    command_spec = build_batch_job_create_command(
-                        cfg,
-                        runtime,
-                        split_preset,
-                        job,
-                        host_data_root_override=split_host_data_root_override,
-                    )
-                except ValueError as e:
-                    console.print(f"[err]❌ Part {index} invalid: {e}[/]")
-                    return JobResult(index, job.path, job.output, 2)
-
-                job_host_path = _resolve_host_path_for_detection(
-                    cfg, runtime, split_raw, split_host_data_root_override
-                )
-                return PlannedJob(
-                    index=index,
-                    job=job,
-                    command_spec=command_spec,
-                    host_path=job_host_path,
-                )
-
-            summary = run_job_batch(
+            return handle_split_series(
                 cfg,
+                runtime,
                 executor,
-                split_jobs,
-                prepare_split_job,
-                item_label="Part",
-                started=split_started,
+                notifier,
+                preset=preset,
+                raw=raw,
+                content_path=content_path,
+                host_data_root_override=host_data_root_override,
+                episodes=episodes,
+                episode_keys=episode_keys,
             )
-            render_job_results(summary, title="Split Series Results", index_label="Part")
-
-            if summary.succeeded > 0:
-                console.print(
-                    f"[ok]✅ Split series completed with {summary.succeeded}"
-                    f" successful part(s).[/]"
-                )
-                successful_outputs = [
-                    _host_torrent_output_path(cfg, result.output_path)
-                    for result in summary.results
-                    if result.succeeded
-                ]
-                maybe_fix_torrent_permissions(cfg, successful_outputs)
-            else:
-                console.print("[err]❌ Split series failed for all parts.[/]")
-
-            notifier.notify(
-                NotifyEvent(
-                    event_type="batch",
-                    success=summary.failed == 0,
-                    title=(
-                        "Split Series Complete"
-                        if summary.failed == 0
-                        else (
-                            "Split Series Failed"
-                            if summary.succeeded == 0
-                            else "Split Series Partial"
-                        )
-                    ),
-                    details={
-                        "succeeded": summary.succeeded,
-                        "failed": summary.failed,
-                        "result_rows": [result.as_tuple() for result in summary.results],
-                        "elapsed": summary.elapsed,
-                    },
-                )
-            )
-            did_split = True
 
     if not did_split:
         command_spec = build_create_command(
@@ -3446,6 +3467,9 @@ def handle_create(
             )
         else:
             console.print(f"[info]ℹ Storage detected as {storage_type.upper()} → workers auto[/]")
+
+        if workers is None:
+            command_spec = command_spec.with_args("--workers", "0")
 
         if confirm_cmd(command_spec.argv, cwd=command_spec.cwd):
             outputs_before = (

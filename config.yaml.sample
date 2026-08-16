@@ -81,7 +81,7 @@ notifications:
     enabled: false
     app_token: ${PUSHOVER_APP_TOKEN}
     user_key: ${PUSHOVER_USER_KEY}
-    # Pushover priority: -2 (silent) to 2 (emergency)
+    # Pushover priority: -2 (silent) to 1 (high)
     priority: 0
     failure_priority: 1
     # Optional: target specific device name(s)

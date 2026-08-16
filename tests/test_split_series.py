@@ -227,6 +227,12 @@ class TestParseSplitRanges:
         with pytest.raises(ValueError, match="Overlapping"):
             mkbrr_wizard.parse_split_ranges("1-12, 10-22", available)
 
+    def test_omitted_episode_raises(self, mkbrr_wizard: ModuleType) -> None:
+        available = _s01(list(range(1, 13)))
+
+        with pytest.raises(ValueError, match="omit"):
+            mkbrr_wizard.parse_split_ranges("1-5, 7-12", available)
+
     def test_empty_range_raises(self, mkbrr_wizard: ModuleType) -> None:
         available = _s01(list(range(1, 11)))
         with pytest.raises(ValueError, match="no episodes found"):
@@ -524,7 +530,7 @@ presets_yaml: {presets_yaml}
                 "1",  # create
                 "1",  # preset
                 str(season_dir),  # content path
-                "1-11",  # single range / one partial torrent
+                "1-12",  # single complete range / one torrent
             ]
         )
         monkeypatch.setattr(mkbrr_wizard.Prompt, "ask", seq)
@@ -547,17 +553,17 @@ presets_yaml: {presets_yaml}
 
         mkbrr_wizard.main()
 
-        # one single partial command should run
+        # One single complete-range command should run.
         assert len(executed_cmds) == 1
         includes: list[str] = []
         it = iter(executed_cmds[0])
         for token in it:
             if token == "--include":
                 includes.append(next(it))
-        assert len(includes) == 11
+        assert len(includes) == 12
         assert "*S01E01*" in includes
         assert "*S01E11*" in includes
-        assert "*S01E12*" not in includes
+        assert "*S01E12*" in includes
 
     def test_user_declines_split(
         self, tmp_path, mkbrr_wizard: ModuleType, monkeypatch: Any

@@ -18,6 +18,19 @@ def _write_config(tmp_path: Path, yaml_content: str) -> Path:
 class TestLoadConfig:
     """Tests for load_config function."""
 
+    def test_public_config_models_are_pydantic_and_normalize_paths(
+        self, mkbrr_wizard: ModuleType
+    ) -> None:
+        paths = mkbrr_wizard.PathsCfg(
+            host_config_dir="~/mkbrr/",
+            container_data_root="/data/",
+        )
+
+        assert isinstance(paths, mkbrr_wizard.BaseModel)
+        assert paths.host_data_root == "/mnt/user/data"
+        assert paths.host_config_dir == str(Path.home() / "mkbrr")
+        assert paths.container_data_root == "/data"
+
     def test_missing_config_raises(self, mkbrr_wizard: ModuleType) -> None:
         """Missing config file should raise FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
@@ -261,6 +274,7 @@ unraid:
         [
             pytest.param("3.0", 3, id="integral_float"),
             pytest.param("3.9", None, id="fractional_float"),
+            pytest.param("yes", None, id="boolean"),
         ],
     )
     def test_legacy_integer_normalization_accepts_only_integral_values(
