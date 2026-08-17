@@ -94,7 +94,7 @@ Keep those tests stable while moving new behavior to directly imported modules.
 - `black --check src tests mkbrr-wizard.py`
 - `mypy src tests`
 - Pyright configuration also lives in `pyproject.toml`; do not add a second config
+- `pre-commit` runs these checks locally on each commit; there is no GitHub Actions CI
 
-CI installs `.[dev]`, checks Python 3.10–3.13, and builds/installs a wheel. Keep dev
-dependencies complete enough for a clean environment rather than relying on local
-optional packages.
+Keep dev dependencies (`.[dev]`) complete enough for a clean environment rather than
+relying on local optional packages.

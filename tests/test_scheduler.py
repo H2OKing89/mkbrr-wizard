@@ -69,6 +69,10 @@ def test_scheduler_parallelizes_devices_but_serializes_one_hdd() -> None:
     max_active: dict[str, int] = {}
     global_active = 0
     max_global = 0
+    # Each device signals once its (serialized) job is running; every job
+    # waits for both signals so overlap between disk1 and disk2 is guaranteed
+    # rather than inferred from a sleep duration.
+    device_entered = {"disk1": threading.Event(), "disk2": threading.Event()}
 
     def execute(operation: PlannedOperation) -> OperationResult:
         nonlocal global_active, max_global
@@ -78,7 +82,9 @@ def test_scheduler_parallelizes_devices_but_serializes_one_hdd() -> None:
             max_active[key] = max(max_active.get(key, 0), active[key])
             global_active += 1
             max_global = max(max_global, global_active)
-        time.sleep(0.03)
+        device_entered[key].set()
+        for event in device_entered.values():
+            assert event.wait(timeout=2), "device job did not start in time"
         with lock:
             active[key] -= 1
             global_active -= 1

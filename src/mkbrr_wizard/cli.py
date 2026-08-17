@@ -7,7 +7,7 @@ import json
 import os
 import sys
 import sysconfig
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
@@ -231,11 +231,15 @@ def _build_plan(
             estimate=estimate,
         )
     if args.command in {"batch", "plan"}:
+        resume_ids: frozenset[str] = frozenset()
+        if getattr(args, "resume", False) and getattr(args, "report", None):
+            resume_ids = frozenset(RunJournal(args.report).successful_operation_ids())
         plan = planner.plan_batch(
             _load_manifest(args.manifest),
             preset=args.preset,
             dry_run=args.command == "plan" or args.dry_run,
             estimate=estimate,
+            resume_ids=resume_ids,
         )
         policy = _scheduler_policy(args, application.cfg)
         return plan.model_copy(
@@ -383,7 +387,9 @@ def _run_headless(args: argparse.Namespace) -> int:
     if plan.dry_run:
         _emit_plan(plan, args)
         known_blocked = any(
-            operation.metadata.get("output_exists") is True for operation in plan.operations
+            operation.metadata.get("output_exists") is True
+            and not operation.metadata.get("resumed")
+            for operation in plan.operations
         )
         return 2 if known_blocked else 0
     if not args.json:
@@ -483,7 +489,7 @@ def _run_init_config(args: argparse.Namespace) -> int:
 
 
 @contextmanager
-def _legacy_arguments(args: argparse.Namespace):
+def _legacy_arguments(args: argparse.Namespace) -> Iterator[None]:
     original = sys.argv
     forwarded = [original[0], "--config", args.config]
     if args.docker:

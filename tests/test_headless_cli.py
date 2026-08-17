@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -105,7 +108,7 @@ def test_docker_plan_json_labels_host_and_runtime_preset_paths(
     monkeypatch,
 ) -> None:
     config, content, output_root = _environment(tmp_path)
-    monkeypatch.setattr(cli.legacy.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.legacy.sys, "stdin", SimpleNamespace(isatty=lambda: True))
 
     exit_code = cli.main(
         [
@@ -148,7 +151,7 @@ def test_docker_inspect_and_check_plans_never_allocate_a_tty(
     config, content, output_root = _environment(tmp_path)
     torrent = output_root / "movie.torrent"
     torrent.write_bytes(b"torrent")
-    monkeypatch.setattr(cli.legacy.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.legacy.sys, "stdin", SimpleNamespace(isatty=lambda: True))
 
     commands: list[list[str]] = []
     for arguments in (
@@ -327,6 +330,62 @@ def test_create_returns_underlying_failure_exit_code(tmp_path: Path, capsys) -> 
     payload = json.loads(capsys.readouterr().out)
     assert payload["exit_code"] == 1
     assert payload["run"]["results"][0]["status"] == "failed"
+
+
+def test_batch_resume_permits_existing_output_for_successful_job(tmp_path: Path, capsys) -> None:
+    """Planning must not block a resume on output left behind by a prior success."""
+    fake_binary = tmp_path / "fake-mkbrr.sh"
+    fake_binary.write_text(
+        "#!/bin/sh\n"
+        "while [ $# -gt 0 ]; do\n"
+        '  if [ "$1" = "--output" ]; then\n'
+        "    shift\n"
+        '    : > "$1"\n'
+        "  fi\n"
+        "  shift\n"
+        "done\n",
+        encoding="utf-8",
+    )
+    fake_binary.chmod(0o755)
+    config, content, output_root = _environment(tmp_path, binary=str(fake_binary))
+    manifest_path = tmp_path / "batch.yaml"
+    manifest_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "jobs": [
+                    {
+                        "path": str(content),
+                        "output": str(output_root / "movie.torrent"),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.json"
+    arguments = [
+        "--config",
+        str(config),
+        "--native",
+        "batch",
+        str(manifest_path),
+        "--preset",
+        "test",
+        "--report",
+        str(report),
+        "--json",
+        "--no-estimate",
+    ]
+
+    assert cli.main(arguments) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["run"]["summary"]["succeeded"] == 1
+    assert (output_root / "movie.torrent").is_file()
+
+    assert cli.main([*arguments, "--resume"]) == 0
+    resumed = json.loads(capsys.readouterr().out)
+    assert resumed["run"]["summary"]["skipped"] == 1
 
 
 def test_batch_report_can_be_resumed(tmp_path: Path, capsys) -> None:
@@ -809,3 +868,21 @@ def test_interrupted_batch_json_keeps_partial_results(
         OperationStatus.SUCCEEDED.value,
         OperationStatus.CANCELLED.value,
     ]
+
+
+def test_root_launcher_delegates_to_cli_main(tmp_path: Path) -> None:
+    """The source-checkout compatibility launcher must run as a real entry point."""
+    launcher = Path(__file__).resolve().parents[1] / "mkbrr-wizard.py"
+    destination = tmp_path / "config.yaml"
+
+    completed = subprocess.run(
+        [sys.executable, str(launcher), "--config", str(destination), "init-config", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload == {"ok": True, "exit_code": 0, "config": str(destination.resolve())}
+    assert destination.is_file()

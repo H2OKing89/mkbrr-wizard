@@ -6,6 +6,8 @@ import subprocess
 from collections.abc import Sequence
 from typing import Any
 
+_CLEANUP_TIMEOUT_SECONDS = 5
+
 
 def cleanup_named_docker_container(
     command: Sequence[str],
@@ -27,22 +29,16 @@ def cleanup_named_docker_container(
     except (ValueError, IndexError):
         return "Could not identify the Docker container"
 
-    completed: subprocess.CompletedProcess[Any]
+    diagnostics_kwargs: dict[str, Any] = (
+        {"capture_output": True, "text": True} if capture_diagnostics else {}
+    )
     try:
-        if capture_diagnostics:
-            completed = subprocess.run(
-                ("docker", "kill", container_name),
-                check=False,
-                timeout=5,
-                capture_output=True,
-                text=True,
-            )
-        else:
-            completed = subprocess.run(
-                ("docker", "kill", container_name),
-                check=False,
-                timeout=5,
-            )
+        completed = subprocess.run(
+            ("docker", "kill", container_name),
+            check=False,
+            timeout=_CLEANUP_TIMEOUT_SECONDS,
+            **diagnostics_kwargs,
+        )
     except (OSError, subprocess.TimeoutExpired) as error:
         return f"Docker container cleanup failed: {type(error).__name__}: {error}"
 

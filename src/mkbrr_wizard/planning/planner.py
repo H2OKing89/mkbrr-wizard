@@ -155,6 +155,15 @@ def _operation_identity(
     return _operation_id(kind, encoded)
 
 
+def _is_under(path: str, root: str) -> bool:
+    normalized_path = os.path.normpath(os.path.abspath(path))
+    normalized_root = os.path.normpath(os.path.abspath(root))
+    try:
+        return os.path.commonpath((normalized_path, normalized_root)) == normalized_root
+    except ValueError:
+        return False
+
+
 def _storage_identity(path: str, storage: StorageKind) -> str:
     match = _UNRAID_DEVICE.match(os.path.abspath(path))
     if match:
@@ -176,17 +185,33 @@ def _estimate_content(path: str, *, max_entries: int = 100_000) -> tuple[int | N
 
     file_count = 0
     size_bytes = 0
-    try:
-        for root, _, files in os.walk(path):
-            for filename in files:
-                file_count += 1
-                if file_count > max_entries:
-                    return None, None
+
+    def _walk(directory: str) -> bool:
+        nonlocal file_count, size_bytes
+        try:
+            entries = os.scandir(directory)
+        except OSError:
+            return True
+        with entries:
+            for entry in entries:
                 try:
-                    size_bytes += os.path.getsize(os.path.join(root, filename))
+                    is_dir = entry.is_dir(follow_symlinks=False)
                 except OSError:
                     continue
-    except OSError:
+                if is_dir:
+                    if not _walk(entry.path):
+                        return False
+                    continue
+                file_count += 1
+                if file_count > max_entries:
+                    return False
+                try:
+                    size_bytes += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+        return True
+
+    if not _walk(path):
         return None, None
     return file_count, size_bytes
 
@@ -258,6 +283,7 @@ class PlanBuilder:
         dry_run: bool = False,
         estimate: bool = True,
         workflow: str = "batch",
+        resume_ids: frozenset[str] = frozenset(),
     ) -> ExecutionPlan:
         operations: list[PlannedOperation] = []
         plan_warnings: list[str] = []
@@ -289,12 +315,6 @@ class PlanBuilder:
             resolved_outputs[output_identity] = position
             output_dir = Path(host_output).parent
             output_exists = os.path.exists(host_output)
-            if output_exists:
-                warnings.append(
-                    f"Output already exists and execution will be blocked: {host_output}"
-                )
-                if not dry_run:
-                    raise ValueError(f"Output already exists: {host_output}")
             if not output_dir.is_dir():
                 raise ValueError(f"Output directory does not exist: {output_dir}")
             if not os.access(output_dir, os.W_OK):
@@ -336,6 +356,15 @@ class PlanBuilder:
                 effective_options,
                 preset_values,
             )
+            resumed = output_exists and operation_id in resume_ids
+            if output_exists and not resumed:
+                warnings.append(
+                    f"Output already exists and execution will be blocked: {host_output}"
+                )
+                if not dry_run:
+                    raise ValueError(f"Output already exists: {host_output}")
+            elif resumed:
+                warnings.append(f"Output already exists; resuming a completed job: {host_output}")
             operation = PlannedOperation(
                 operation_id=operation_id,
                 position=position,
@@ -362,6 +391,7 @@ class PlanBuilder:
                 warnings=tuple(warnings),
                 metadata={
                     "output_exists": output_exists,
+                    "resumed": resumed,
                     "timeout_seconds": self.cfg.batch.job_timeout_seconds,
                 },
             )
@@ -398,7 +428,7 @@ class PlanBuilder:
             torrent_path,
             context="Inspect torrent path",
         )
-        host_path = legacy.map_torrent_path(self.cfg, "native", runtime_path)
+        host_path = legacy.host_torrent_output_path(self.cfg, runtime_path)
         if not os.path.isfile(host_path):
             raise ValueError(f"Torrent file not found: {host_path}")
         command = legacy.build_inspect_command(
@@ -454,7 +484,7 @@ class PlanBuilder:
             torrent_path,
             context="Check torrent path",
         )
-        host_torrent = legacy.map_torrent_path(self.cfg, "native", runtime_torrent)
+        host_torrent = legacy.host_torrent_output_path(self.cfg, runtime_torrent)
         if not os.path.isfile(host_torrent):
             raise ValueError(f"Torrent file not found: {host_torrent}")
 
@@ -469,6 +499,15 @@ class PlanBuilder:
             if workers is not None
             else legacy.resolve_workers(storage.value, self.cfg.workers)
         )
+        extra_mounts: tuple[tuple[str, str], ...] = ()
+        if self.runtime == "docker" and resolved.host_mount_override:
+            # A physical-disk override for the content mount can hide a torrent
+            # that lives elsewhere under host_data_root; bind it directly.
+            reachable = _is_under(host_torrent, self.cfg.paths.host_output_dir) or _is_under(
+                host_torrent, resolved.host_mount_override
+            )
+            if not reachable:
+                extra_mounts = ((host_torrent, runtime_torrent),)
         command = legacy.build_check_command(
             self.cfg,
             self.runtime,
@@ -478,6 +517,7 @@ class PlanBuilder:
             quiet=quiet,
             workers=selected_workers,
             host_data_root_override=resolved.host_mount_override,
+            extra_mounts=extra_mounts,
             interactive=False,
         )
         operation = PlannedOperation(

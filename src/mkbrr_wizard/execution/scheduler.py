@@ -171,10 +171,26 @@ class RunJournal:
                     temporary_path = Path(temporary.name)
                 assert temporary_path is not None
                 os.replace(temporary_path, self.path)
+                temporary_path = None
+                self._fsync_directory(self.path.parent)
             except BaseException:
                 if temporary_path is not None:
                     temporary_path.unlink(missing_ok=True)
                 raise
+
+    @staticmethod
+    def _fsync_directory(directory: Path) -> None:
+        """Best-effort durability for the rename recorded in the directory entry."""
+        try:
+            dir_fd = os.open(directory, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(dir_fd)
 
 
 class DiskAwareScheduler:

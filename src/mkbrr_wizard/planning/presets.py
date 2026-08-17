@@ -163,6 +163,8 @@ def _merge_preset_values(defaults: PresetValues, selected: PresetValues) -> Pres
         selected_updates["piece_length"] = selected.piece_length
         selected_updates["target_piece_count"] = None
     if selected.target_piece_count is not None:
+        # A selected preset's target_piece_count wins over its own piece_length;
+        # the raise below still catches a genuine default-vs-selected conflict.
         selected_updates["target_piece_count"] = selected.target_piece_count
         selected_updates["piece_length"] = None
     effective = effective.model_copy(update=selected_updates)

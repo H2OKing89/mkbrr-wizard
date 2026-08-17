@@ -78,7 +78,10 @@ class WizardApplication:
             )
 
         timeout_raw = operation.metadata.get("timeout_seconds")
-        timeout = int(timeout_raw) if isinstance(timeout_raw, int | float) else None
+        timeout: float | None = None
+        if isinstance(timeout_raw, int | float) and not isinstance(timeout_raw, bool):
+            if timeout_raw > 0:
+                timeout = float(timeout_raw)
         started_at = _utc_now()
         started = time.monotonic()
         stdout: str | None = None
@@ -247,6 +250,10 @@ class WizardApplication:
     ) -> SchedulerRun:
         if plan.dry_run:
             raise ValueError("A dry-run plan cannot be executed")
+        with self._process_lock:
+            # Drop cancellation flags left by a prior run on this instance so
+            # they cannot block an unrelated operation that reuses the same id.
+            self._cancel_requested.clear()
         scheduler = DiskAwareScheduler(policy)
         return scheduler.run(
             plan,

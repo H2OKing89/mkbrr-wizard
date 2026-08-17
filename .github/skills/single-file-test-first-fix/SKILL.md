@@ -4,7 +4,7 @@ description: 'Make safe changes in mkbrr-wizard by writing or updating tests fir
 argument-hint: 'What bug or behavior change should be covered first?'
 ---
 
-# Single-File Test-First Fix
+# Package Test-First Fix
 
 ## Docs First
 

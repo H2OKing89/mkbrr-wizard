@@ -1,3 +1,10 @@
+# Pre-Migration Architecture Assessment (Historical)
+
+This review was written against the single-file `mkbrr-wizard.py` script, before
+the `src/mkbrr_wizard/` package restructuring it recommends. It is kept for
+historical context; see `.github/copilot-instructions.md` for the current
+architecture.
+
 The best direction is not a ground-up rewrite. Keep Python and Rich, but turn the project into an installable modular application centered on:
 
 `typed request → validated plan → execution events → structured result`

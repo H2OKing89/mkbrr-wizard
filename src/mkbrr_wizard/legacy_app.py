@@ -1783,6 +1783,7 @@ def build_check_command(
     quiet: bool = False,
     workers: int | None = None,
     host_data_root_override: str | None = None,
+    extra_mounts: tuple[tuple[str, str], ...] = (),
     *,
     interactive: bool = True,
 ) -> CommandSpec:
@@ -1793,6 +1794,7 @@ def build_check_command(
             cfg.paths.container_config_dir,
             host_data_root_override=host_data_root_override,
             interactive=interactive,
+            extra_mounts=extra_mounts,
         ) + [
             "check",
             torrent_path,
@@ -1816,6 +1818,7 @@ def docker_run_base(
     host_data_root_override: str | None = None,
     *,
     interactive: bool = True,
+    extra_mounts: tuple[tuple[str, str], ...] = (),
 ) -> list[str]:
     cmd = ["docker", "run", "--rm", "--name", f"mkbrr-wizard-{uuid.uuid4().hex}"]
 
@@ -1840,6 +1843,10 @@ def docker_run_base(
     ]
     if not _is_under_root(cfg.presets_yaml_host, cfg.paths.host_config_dir):
         cmd += ["-v", f"{cfg.presets_yaml_host}:{cfg.presets_yaml_container}:ro"]
+    # Bind paths left unreachable by a data_root override (e.g. a torrent file
+    # outside the physical disk substituted for the FUSE union mount).
+    for host_path, container_path in extra_mounts:
+        cmd += ["-v", f"{host_path}:{container_path}:ro"]
     cmd += [cfg.mkbrr.image, "mkbrr"]
     return cmd
 

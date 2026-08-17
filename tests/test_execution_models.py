@@ -177,3 +177,38 @@ def test_models_reject_unknown_fields_and_naive_timestamps() -> None:
             created_at=datetime(2026, 8, 16, 12, 0),
             runtime=RuntimeKind.NATIVE,
         )
+
+
+def test_result_rejects_finished_at_before_started_at() -> None:
+    with pytest.raises(ValidationError, match="finished_at cannot precede started_at"):
+        OperationResult(
+            plan_id="plan-1",
+            operation_id="create-1",
+            status=OperationStatus.SUCCEEDED,
+            exit_code=0,
+            started_at=NOW,
+            finished_at=datetime(2026, 8, 16, 11, 0, tzinfo=timezone.utc),
+        )
+
+
+def test_result_rejects_succeeded_with_non_zero_exit_code() -> None:
+    with pytest.raises(ValidationError, match="cannot have a non-zero exit_code"):
+        OperationResult(
+            plan_id="plan-1",
+            operation_id="create-1",
+            status=OperationStatus.SUCCEEDED,
+            exit_code=1,
+            finished_at=NOW,
+        )
+
+
+def test_command_rejects_empty_tuple() -> None:
+    with pytest.raises(ValidationError, match="at least 1 item"):
+        PlannedOperation.model_validate({**_operation().model_dump(), "command": ()})
+
+
+def test_command_rejects_nul_byte_argument() -> None:
+    with pytest.raises(ValidationError, match="NUL byte"):
+        PlannedOperation.model_validate(
+            {**_operation().model_dump(), "command": ("mkbrr", "create", "bad\x00arg")}
+        )
