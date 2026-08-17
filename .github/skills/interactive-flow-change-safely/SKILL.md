@@ -23,7 +23,7 @@ argument-hint: 'Which menu or prompt sequence should change?'
 ## Procedure
 
 1. Document current and desired interaction sequence as input/output steps.
-2. Update prompt/branch logic in `mkbrr-wizard.py` with minimal edits.
+2. Update prompt/branch logic in `src/mkbrr_wizard/legacy_app.py` with minimal edits.
 3. Add or update flow tests (`tests/test_main_flow.py`, `tests/test_main_docker_flow.py`, `tests/test_main_edge_cases.py`, `tests/test_main_failures.py`, `tests/test_interactive.py`).
 4. Use monkeypatch for prompt responses, runtime detection, and subprocess calls so tests stay deterministic.
 5. Verify command builders still receive expected values from prompts.
@@ -37,7 +37,7 @@ argument-hint: 'Which menu or prompt sequence should change?'
 
 ## References
 
-- `mkbrr-wizard.py`
+- `src/mkbrr_wizard/legacy_app.py`
 - `tests/test_interactive.py`
 - `tests/test_main_flow.py`
 - `tests/test_main_docker_flow.py`

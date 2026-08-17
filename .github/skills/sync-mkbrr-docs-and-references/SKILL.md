@@ -23,7 +23,7 @@ argument-hint: 'Which mkbrr area should be re-validated (install/create/check/in
 ## Procedure
 1. Fetch index from `https://mkbrr.com/llms.txt` and identify required upstream pages.
 2. Refresh local docs by running `bash scripts/update-mkbrr-docs.sh`.
-3. Compare changed docs against behavior in `mkbrr-wizard.py` command builders and prompt text.
+3. Compare changed docs against shared builders and prompts in `src/mkbrr_wizard/legacy_app.py`, strict fields in `src/mkbrr_wizard/batch_models.py`, and headless options in `src/mkbrr_wizard/cli.py`.
 4. Update README or inline guidance if wording is stale.
 5. Add or adjust tests when behavior changes are required (not just doc text).
 

@@ -21,10 +21,10 @@ argument-hint: 'Which mkbrr flag or behavior should be added or changed?'
 
 ## Procedure
 1. Confirm expected behavior from local docs in `docs/` and upstream pages listed in `https://mkbrr.com/llms.txt`.
-2. Locate affected builder function in `mkbrr-wizard.py` (`build_create_command`, `build_check_command`, `build_inspect_command`, or `build_batch_job_create_command`).
-3. Apply minimal dataclass/config changes needed in `load_config()` and related config models.
-4. Update interactive prompt collection in `main()` only where required by the new option.
-5. Add or update tests in relevant files under `tests/` (usually `tests/test_commands_builder.py` plus one integration-style flow test if UI behavior changed).
+2. Locate the shared builder in `src/mkbrr_wizard/legacy_app.py` (`build_create_command`, `build_check_command`, `build_inspect_command`, or `build_batch_job_create_command`).
+3. Update the strict Pydantic request model in `batch_models.py` and regenerate the tracked schema when the flag is valid in batch manifests.
+4. Wire headless arguments in `cli.py` and update interactive prompts in `legacy_app.py` only where required.
+5. Add builder/model tests plus a headless or interactive flow test for every exposed path.
 6. Run `pytest`, then run `ruff check .` for style regressions.
 
 ## Completion Checks

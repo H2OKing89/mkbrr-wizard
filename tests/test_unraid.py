@@ -141,7 +141,7 @@ def test_resolve_unraid_content_path_native(
     monkeypatch.setattr(
         mkbrr_wizard,
         "resolve_unraid_disk_path",
-        lambda cfg, raw: raw.replace("/mnt/user", "/mnt/disk5"),
+        lambda cfg, raw, **kwargs: raw.replace("/mnt/user", "/mnt/disk5"),
     )
 
     resolved = mkbrr_wizard.resolve_unraid_content_path(
@@ -163,7 +163,7 @@ def test_resolve_unraid_content_path_docker_from_container_path(
     monkeypatch.setattr(
         mkbrr_wizard,
         "resolve_unraid_disk_path",
-        lambda cfg, raw: raw.replace("/mnt/user", "/mnt/disk5"),
+        lambda cfg, raw, **kwargs: raw.replace("/mnt/user", "/mnt/disk5"),
     )
 
     resolved = mkbrr_wizard.resolve_unraid_content_path(

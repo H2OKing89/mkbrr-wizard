@@ -72,8 +72,7 @@ def _build_main_batch_test_files(
         batch_block = f"batch:\n  mode: {batch_mode}\n"
 
     config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
+    config_yaml.write_text(f"""
 runtime: {runtime}
 docker_support: {'true' if docker_support else 'false'}
 chown: true
@@ -87,8 +86,7 @@ paths:
     host_config_dir: {cfg_dir}
     container_config_dir: /root/.config/mkbrr
 presets_yaml: {presets_yaml}
-"""
-    )
+""")
 
     return config_yaml, cfg_dir, host_data, output_dir, presets_yaml, content, output
 
@@ -274,11 +272,13 @@ def test_build_batch_job_create_command_native_and_docker(
     assert "-b" not in native_cmd
     assert "-P" in native_cmd
     assert "--output" in native_cmd
+    assert "--output-dir" not in native_cmd
+    assert "--output-dir=" in native_cmd
     assert "--tracker" in native_cmd
     assert "--private=true" in native_cmd
     assert "--no-date=false" in native_cmd
     assert "--entropy=true" in native_cmd
-    assert native_spec.cwd == cfg.paths.host_output_dir
+    assert native_spec.cwd is None
 
     docker_content = tmp_path / "docker-content.mkv"
     docker_content.write_text("x")
@@ -298,6 +298,8 @@ def test_build_batch_job_create_command_native_and_docker(
     assert "-b" not in docker_cmd
     assert "-P" in docker_cmd
     assert "--output" in docker_cmd
+    assert "--output-dir" not in docker_cmd
+    assert "--output-dir=" in docker_cmd
     assert docker_spec.cwd is None
 
 
@@ -306,7 +308,7 @@ def test_batch_job_from_mapping_normalizes_typed_fields(mkbrr_wizard: ModuleType
         {
             "path": " /data/show ",
             "output": " /torrentfiles/show.torrent ",
-            "trackers": [" https://tracker.example/announce ", ""],
+            "trackers": [" https://tracker.example/announce "],
             "webseeds": ["https://seed.example/file"],
             "private": False,
             "piece_length": 20,

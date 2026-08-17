@@ -41,6 +41,28 @@ def test_build_create_command_docker(mkbrr_wizard: ModuleType) -> None:
     assert spec.cwd is None
 
 
+def test_docker_mounts_an_external_absolute_preset_file(mkbrr_wizard: ModuleType) -> None:
+    cfg = sample_cfg(mkbrr_wizard).model_copy(update={"presets_yaml": "/opt/mkbrr/presets.yaml"})
+
+    command = mkbrr_wizard.docker_run_base(cfg, cfg.paths.container_output_dir)
+
+    assert (
+        f"/opt/mkbrr/presets.yaml:{cfg.paths.container_config_dir}/.external-presets.yaml:ro"
+        in command
+    )
+
+
+def test_docker_preserves_nested_relative_preset_path(mkbrr_wizard: ModuleType) -> None:
+    cfg = sample_cfg(mkbrr_wizard).model_copy(update={"presets_yaml": "trackers/presets.yaml"})
+
+    assert cfg.presets_yaml_container == "/root/.config/mkbrr/trackers/presets.yaml"
+
+    command = mkbrr_wizard.docker_run_base(cfg, cfg.paths.container_output_dir)
+
+    # Already nested under host_config_dir, so no extra external bind is needed.
+    assert not any(":ro" in arg for arg in command)
+
+
 def test_build_create_command_native(mkbrr_wizard: ModuleType) -> None:
     cfg = sample_cfg(mkbrr_wizard)
     spec = mkbrr_wizard.build_create_command(cfg, "native", "/mnt/user/data/file.mkv", "btn")
@@ -215,6 +237,29 @@ def test_build_check_command_flags(mkbrr_wizard: ModuleType) -> None:
     assert "--quiet" in spec.argv
     assert "--workers" in spec.argv
     assert "4" in spec.argv
+
+
+def test_build_check_command_docker_binds_extra_mounts(mkbrr_wizard: ModuleType) -> None:
+    cfg = sample_cfg(mkbrr_wizard)
+    spec = mkbrr_wizard.build_check_command(
+        cfg,
+        "docker",
+        "/data/other-share/t.torrent",
+        "/data/file.mkv",
+        host_data_root_override="/mnt/disk5/data",
+        extra_mounts=(("/mnt/disk9/other-share/t.torrent", "/data/other-share/t.torrent"),),
+    )
+    assert "/mnt/disk9/other-share/t.torrent:/data/other-share/t.torrent:ro" in spec.argv
+
+
+def test_docker_run_base_binds_extra_mounts(mkbrr_wizard: ModuleType) -> None:
+    cfg = sample_cfg(mkbrr_wizard)
+    command = mkbrr_wizard.docker_run_base(
+        cfg,
+        cfg.paths.container_config_dir,
+        extra_mounts=(("/mnt/disk9/t.torrent", "/data/t.torrent"),),
+    )
+    assert "/mnt/disk9/t.torrent:/data/t.torrent:ro" in command
 
 
 def test_pick_runtime_forced_overrides(mkbrr_wizard: ModuleType, monkeypatch: Any) -> None:

@@ -1,10 +1,10 @@
 ---
-name: single-file-test-first-fix
-description: 'Make safe changes in a single-file Python CLI by writing or updating tests first. Use for bug fixes, behavior changes, and regressions in mkbrr-wizard.py with pytest monkeypatch patterns.'
+name: package-test-first-fix
+description: 'Make safe changes in mkbrr-wizard by writing or updating tests first. Use for bug fixes, behavior changes, and regressions across the package or legacy interactive workflow.'
 argument-hint: 'What bug or behavior change should be covered first?'
 ---
 
-# Single-File Test-First Fix
+# Package Test-First Fix
 
 ## Docs First
 
@@ -16,23 +16,23 @@ argument-hint: 'What bug or behavior change should be covered first?'
 
 ## When To Use
 
-- You need a safe fix in `mkbrr-wizard.py` without regressions.
+- You need a safe package or interactive-compatibility fix without regressions.
 - A behavior is unclear and should be locked with a test before editing logic.
 - You are touching prompts, command builders, config loading, or runtime detection.
 
 ## Procedure
 
 1. Reproduce the issue in a focused test file under `tests/`.
-2. Use the fixture-based import pattern from `tests/conftest.py`: always reference functions and classes via `mkbrr_wizard.<name>`.
-3. Prefer `monkeypatch.setattr(mkbrr_wizard, ...)` when mocking module-level behavior.
-4. Run the smallest test slice first (`pytest tests/<file>.py -k <name>`), then implement minimal code changes in `mkbrr-wizard.py`.
+2. Import new package modules normally. Use the `mkbrr_wizard` fixture only for behavior still owned by `legacy_app.py`.
+3. Mock at the module boundary where a dependency is looked up.
+4. Run the smallest test slice first (`pytest tests/<file>.py -k <name>`), then implement the change in the owning module under `src/mkbrr_wizard/`.
 5. Expand coverage for nearby edge cases only where risk is high.
 6. Run full `pytest` and then `ruff check .`.
 
 ## Completion Checks
 
 - At least one test fails before the fix and passes after.
-- No direct imports from `mkbrr-wizard.py` in tests.
+- No imports from the root compatibility launcher in tests.
 - Existing behavior outside the target area remains green.
 
 ## References
