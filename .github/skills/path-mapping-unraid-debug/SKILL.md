@@ -24,7 +24,7 @@ argument-hint: 'What path(s), runtime, and observed mismatch are you debugging?'
 ## Procedure
 
 1. Capture runtime (`docker` or `native`) and relevant config (`paths`, `unraid`, and `batch`).
-2. Trace conversion through `map_content_path()` and `map_torrent_path()` in `mkbrr-wizard.py`.
+2. Trace conversion through `map_content_path()` and `map_torrent_path()` in `src/mkbrr_wizard/legacy_app.py`, then inspect how `planning/planner.py` records the resolved forms.
 3. For Unraid issues, trace helper logic that resolves `/mnt/user/*` to physical mounts and review `mount_priority` behavior.
 4. Reproduce with focused unit tests in `tests/test_path_conversion.py` and `tests/test_unraid.py`.
 5. If behavior is intentional, improve warning/error clarity. If behavior is wrong, patch mapping logic with minimal surface area.
@@ -38,7 +38,8 @@ argument-hint: 'What path(s), runtime, and observed mismatch are you debugging?'
 
 ## References
 
-- `mkbrr-wizard.py`
+- `src/mkbrr_wizard/legacy_app.py`
+- `src/mkbrr_wizard/planning/planner.py`
 - `tests/test_path_conversion.py`
 - `tests/test_unraid.py`
 - `config.yaml.sample`

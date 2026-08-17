@@ -2,30 +2,22 @@
 Pytest configuration and fixtures for mkbrr-wizard tests.
 """
 
-import importlib.util
-import os
+import importlib
 import sys
+from pathlib import Path
 from types import ModuleType
 
 import pytest
 
-# Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Import the real src-layout package in source checkouts.
+SOURCE_ROOT = (Path(__file__).parents[1] / "src").resolve()
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
 
 
 def _load_mkbrr_wizard() -> ModuleType:
-    """Load the mkbrr-wizard module dynamically (handles hyphen in filename)."""
-    module_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mkbrr-wizard.py"
-    )
-    spec = importlib.util.spec_from_file_location("mkbrr_wizard", module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load module from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    # Register in sys.modules BEFORE exec_module to fix dataclass resolution
-    sys.modules["mkbrr_wizard"] = module
-    spec.loader.exec_module(module)
-    return module
+    """Load the legacy compatibility module from the installable package."""
+    return importlib.import_module("mkbrr_wizard.legacy_app")
 
 
 # Load module once at import time and make it available globally

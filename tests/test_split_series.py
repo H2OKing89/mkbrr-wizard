@@ -388,8 +388,7 @@ class TestSplitSeriesMainFlow:
             (season_dir / f"Show.S01E{ep:02d}.1080p.mkv").write_text("x")
 
         config_yaml = tmp_path / "config.yaml"
-        config_yaml.write_text(
-            f"""
+        config_yaml.write_text(f"""
 runtime: native
 docker_support: false
 chown: false
@@ -403,8 +402,7 @@ paths:
   host_config_dir: {config_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {presets_yaml}
-"""
-        )
+""")
         (tmp_path / "torrents").mkdir(exist_ok=True)
 
         monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
@@ -502,8 +500,7 @@ presets_yaml: {presets_yaml}
             (season_dir / f"Show.S01E{ep:02d}.1080p.mkv").write_text("x")
 
         config_yaml = tmp_path / "config.yaml"
-        config_yaml.write_text(
-            f"""
+        config_yaml.write_text(f"""
 runtime: native
 docker_support: false
 chown: false
@@ -517,8 +514,7 @@ paths:
   host_config_dir: {config_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {presets_yaml}
-"""
-        )
+""")
         (tmp_path / "torrents").mkdir(exist_ok=True)
 
         monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
@@ -580,8 +576,7 @@ presets_yaml: {presets_yaml}
             (season_dir / f"Show.S01E{ep:02d}.mkv").write_text("x")
 
         config_yaml = tmp_path / "config.yaml"
-        config_yaml.write_text(
-            f"""
+        config_yaml.write_text(f"""
 runtime: native
 docker_support: false
 chown: false
@@ -595,8 +590,7 @@ paths:
   host_config_dir: {config_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {presets_yaml}
-"""
-        )
+""")
         (tmp_path / "torrents").mkdir(exist_ok=True)
 
         monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
@@ -648,8 +642,7 @@ presets_yaml: {presets_yaml}
         (content_dir / "movie.mkv").write_text("x")
 
         config_yaml = tmp_path / "config.yaml"
-        config_yaml.write_text(
-            f"""
+        config_yaml.write_text(f"""
 runtime: native
 docker_support: false
 chown: false
@@ -663,8 +656,7 @@ paths:
   host_config_dir: {config_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {presets_yaml}
-"""
-        )
+""")
         (tmp_path / "torrents").mkdir(exist_ok=True)
 
         monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))

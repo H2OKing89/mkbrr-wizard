@@ -41,6 +41,23 @@ def test_build_create_command_docker(mkbrr_wizard: ModuleType) -> None:
     assert spec.cwd is None
 
 
+def test_docker_mounts_an_external_absolute_preset_file(mkbrr_wizard: ModuleType) -> None:
+    cfg = sample_cfg(mkbrr_wizard).model_copy(update={"presets_yaml": "/opt/mkbrr/presets.yaml"})
+
+    command = mkbrr_wizard.docker_run_base(cfg, cfg.paths.container_output_dir)
+
+    assert (
+        f"/opt/mkbrr/presets.yaml:{cfg.paths.container_config_dir}/.external-presets.yaml:ro"
+        in command
+    )
+
+
+def test_docker_preserves_nested_relative_preset_path(mkbrr_wizard: ModuleType) -> None:
+    cfg = sample_cfg(mkbrr_wizard).model_copy(update={"presets_yaml": "trackers/presets.yaml"})
+
+    assert cfg.presets_yaml_container == "/root/.config/mkbrr/trackers/presets.yaml"
+
+
 def test_build_create_command_native(mkbrr_wizard: ModuleType) -> None:
     cfg = sample_cfg(mkbrr_wizard)
     spec = mkbrr_wizard.build_create_command(cfg, "native", "/mnt/user/data/file.mkv", "btn")

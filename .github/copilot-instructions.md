@@ -1,63 +1,100 @@
 # Copilot Instructions — mkbrr-wizard
 
-## Project Overview
+## Project overview
 
-Single-file Python CLI wizard (`mkbrr-wizard.py`, ~2400 lines) that wraps the [mkbrr](https://github.com/autobrr/mkbrr) torrent creator. It drives mkbrr via either Docker or a native binary, with interactive Rich UI prompts, Unraid-specific path handling, and push notifications (Pushover/Discord).
+`mkbrr-wizard` is an installable Python package that wraps
+[mkbrr](https://github.com/autobrr/mkbrr). It supports an interactive Rich wizard,
+headless commands, native or Docker execution, strict batch manifests, and
+Unraid-aware planning and scheduling.
 
-## mkbrr Documentation
+The root `mkbrr-wizard.py` is only a source-checkout compatibility launcher. New
+application code belongs under `src/mkbrr_wizard/`.
 
-When answering questions about mkbrr's CLI flags, configuration, or features, consult the upstream docs rather than guessing:
+## mkbrr documentation
 
-- **Full doc index for LLMs**: <https://mkbrr.com/llms.txt> — lists every available page as a `.md` URL (e.g. `https://mkbrr.com/installation.md`). Fetch this first to discover the right page, then fetch the specific `.md` URL to get the content.
-- **Local offline copies** are committed under [`docs/`](../docs/) for the most commonly needed pages (installation, `create`/`check`/`inspect` CLI reference, presets, batch mode). These can be refreshed by running `bash scripts/update-mkbrr-docs.sh`.
+Confirm mkbrr flags and behavior from the local files under `docs/` before changing
+builders or validation. The upstream index is <https://mkbrr.com/llms.txt>; refresh
+the local copies with `bash scripts/update-mkbrr-docs.sh` when necessary.
 
 ## Architecture
 
-Everything lives in `mkbrr-wizard.py` — there are no packages or submodules. The file is organized into labeled sections (grep for `# ---` comment dividers):
+- `cli.py`: argparse entry point, headless dispatch, JSON/error presentation
+- `application.py`: UI-neutral plan execution and result coordination
+- `batch_models.py`: strict batch models and generated JSON Schema
+- `models.py`: serializable plan, operation, result, and progress contracts
+- `planning/planner.py`: path resolution and effective operation construction
+- `planning/presets.py`: preset/default merging for effective views and resume keys
+- `execution/scheduler.py`: bounded per-device scheduling and atomic resume reports
+- `ui/rendering.py`: caller-console Rich renderers for plans, queues, and results
+- `legacy_app.py`: compatibility home of the existing interactive workflow and its
+  mature config/path/command helpers; shrink this incrementally without changing
+  interactive behavior
 
-1. **Config + parsing** — `@dataclass(frozen=True)` hierarchy (`AppCfg` → `PathsCfg`, `MkbrrCfg`, `OwnershipCfg`, `BatchCfg`, `UnraidCfg`, `WorkersCfg`, `NotificationsCfg`, etc.) loaded from `config.yaml` via `load_config()`.
-2. **Runtime detection** — `pick_runtime()`, `docker_available()`, `native_available()` decide docker vs native.
-3. **Path mapping** — `map_content_path()` / `map_torrent_path()` translate between host (`/mnt/user/data/...`) and container (`/data/...`) paths bidirectionally based on runtime. Unraid helpers resolve FUSE share paths to physical disk paths.
-4. **Workers auto-tune** — `detect_storage_type()` reads `/sys/block/*/queue/rotational` to choose HDD vs SSD worker counts.
-5. **Command builders** — Pure functions (`build_create_command`, `build_inspect_command`, `build_check_command`, `build_batch_job_create_command`) that return `(cmd_list, cwd)`. These are the primary unit-test targets.
-6. **Notifications** — `NotificationManager` sends async HTTP via `httpx` to Pushover/Discord. Uses a background `asyncio` event loop on a daemon thread.
-7. **Interactive UI** — `main()` loop using `rich` prompts. Batch mode collects jobs interactively and validates against `schema/batch.json` (JSON Schema draft-07).
+The intended dependency flow is:
 
-## Module Import Pattern
-
-The filename contains a hyphen (`mkbrr-wizard.py`), so it cannot be imported normally. Tests use `importlib.util.spec_from_file_location` in `tests/conftest.py` to load it as `mkbrr_wizard`. All test files receive the module through the `mkbrr_wizard` pytest fixture:
-
-```python
-def test_example(mkbrr_wizard: ModuleType) -> None:
-    cfg = mkbrr_wizard.AppCfg(...)
-    result = mkbrr_wizard.map_content_path(cfg, "docker", "/mnt/user/data/file")
+```text
+CLI or prompts -> typed request -> ExecutionPlan -> WizardApplication
+               -> DiskAwareScheduler -> OperationResult/ProgressEvent
+               -> JSON or Rich rendering
 ```
 
-Always access functions/classes via `mkbrr_wizard.<name>` in tests — never use bare imports.
+Planning, execution models, and the scheduler must never print, prompt, or create a
+Rich `Console`. UI code receives a caller-owned console.
 
-## Testing
+## Imports and tests
 
-- **Framework**: pytest with `monkeypatch` for mocking (no `unittest.TestCase`).
-- **Run tests**: `pytest` (configured in `pyproject.toml` — `testpaths = ["tests"]`, `-v --tb=short`).
-- **Test structure**: Each test file focuses on one functional area — `test_path_conversion.py`, `test_commands_builder.py`, `test_workers.py`, `test_unraid.py`, `test_notifications.py`, `test_config.py`, `test_batch_mode.py`, etc.
-- **Config in tests**: Build `AppCfg` dataclass instances directly (don't rely on YAML files). Use `tmp_path` for files that must exist on disk.
-- **Mocking pattern**: `monkeypatch.setattr(mkbrr_wizard, "function_name", ...)` or `monkeypatch.setattr(mkbrr_wizard.os.path, "exists", ...)` since the module has its own `os` reference.
-- **Integration tests** (`test_main_flow.py`): Monkeypatch `parse_args`, user prompts, and `subprocess.run` to drive `main()` end-to-end without actual Docker/mkbrr.
+Use normal package imports, for example:
 
-## Code Style & Tooling
+```python
+from mkbrr_wizard.batch_models import BatchManifest
+from mkbrr_wizard.planning import PlanBuilder
+```
 
-- **Python ≥ 3.10** — uses `X | Y` union syntax, `match` is not used but `|` type hints are.
-- **Line length**: 100 (Black + Ruff + isort all configured in `pyproject.toml`).
-- **Linting**: `ruff check .` — selected rules: E, W, F, I, B, C4, UP.
-- **Formatting**: `black .` and `isort .`.
-- **Type checking**: `pyright` (basic mode) — `reportMissingImports = "warning"`, several `Unknown*` reports suppressed.
-- **All dataclasses are `frozen=True`** — never mutate config after construction.
+Older interactive characterization tests use the `mkbrr_wizard` fixture from
+`tests/conftest.py`; that fixture deliberately exposes `mkbrr_wizard.legacy_app`.
+Keep those tests stable while moving new behavior to directly imported modules.
 
-## Key Conventions
+- Use `tmp_path` for filesystem behavior and `monkeypatch` or `unittest.mock` for
+  subprocess/runtime boundaries.
+- Add focused model tests for validation rules and at least one CLI test for new
+  automation behavior.
+- Never require Docker, mkbrr, Unraid mounts, or network access in unit tests.
 
-- **Bool coercion**: `_coerce_bool()` intentionally accepts typo `"ture"` as `True` (this is deliberate, not a bug).
-- **Path cleaning**: `_clean_user_path()` strips quotes and expands `~`/`$VARS`; `_expand_env()` expands env vars without path normalization (used for URLs/tokens).
-- **Env var expansion**: Notification tokens in `config.yaml` use `${VAR}` syntax, expanded at config load time via `os.path.expandvars`.
-- **Optional dependencies**: `prompt_toolkit`, `httpx`, `python-dotenv` are wrapped in `try/except ImportError` with feature flags (`_has_prompt_toolkit`, `_has_httpx`).
-- **Batch schema validation**: `schema/batch.json` is loaded and validated using `jsonschema.Draft7Validator` before execution.
-- **No output flag**: mkbrr commands avoid `-o` flag; instead, native uses `cwd=host_output_dir` and docker uses `-w container_output_dir` for output placement.
+## Single sources of truth
+
+- `BatchJob` and `BatchManifest` own batch validation.
+- `generate_batch_json_schema()` owns both tracked `schema/batch.json` copies.
+- Shared legacy command builders remain the only functions that assemble mkbrr
+  arguments until they are extracted as a unit.
+- `ExecutionPlan`, `OperationResult`, and `ProgressEvent` are the boundary types;
+  do not add new tuple/dict result protocols.
+- Effective plans must show merged preset/default/CLI values, not merely overrides.
+- Resume identities must change when effective work changes and remain stable across
+  generated Docker container names.
+
+## Key behavior
+
+- Configuration is strict Pydantic v2 with `extra="forbid"`. The legacy typo
+  `"ture"` is migrated once with a warning; do not silently accept other typos.
+- Docker paths outside configured mounts fail during planning.
+- Unraid split-share policy is applied before execution.
+- Filtering patterns from presets and CLI are additive; ordinary CLI options
+  override preset values.
+- Batch output collisions are rejected after path normalization and runtime mapping.
+- Spinning disks default to one hashing job per physical device. Global worker
+  budgets must also account conservatively for mkbrr's automatic worker mode.
+- Headless exit codes are `0` success, `1` execution failure, `2` input/config
+  failure, `124` timeout without a successful operation, and `130` cancellation.
+
+## Tooling
+
+- Python 3.10+
+- `pytest`
+- `ruff check .`
+- `black --check src tests mkbrr-wizard.py`
+- `mypy src tests`
+- Pyright configuration also lives in `pyproject.toml`; do not add a second config
+
+CI installs `.[dev]`, checks Python 3.10–3.13, and builds/installs a wheel. Keep dev
+dependencies complete enough for a clean environment rather than relying on local
+optional packages.

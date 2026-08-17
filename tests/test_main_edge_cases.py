@@ -19,8 +19,7 @@ def test_main_create_missing_content_native(
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir()
     config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
+    config_yaml.write_text(f"""
 runtime: native
 docker_support: false
 chown: false
@@ -34,8 +33,7 @@ paths:
   host_config_dir: {cfg_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {cfg_dir}/presets.yaml
-"""
-    )
+""")
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
     monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")
@@ -58,8 +56,7 @@ def test_main_create_rejects_content_outside_docker_mount_before_execution(
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir()
     config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
+    config_yaml.write_text(f"""
 runtime: docker
 docker_support: true
 chown: false
@@ -73,8 +70,7 @@ paths:
   host_config_dir: {cfg_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {cfg_dir}/presets.yaml
-"""
-    )
+""")
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
     monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "docker")
@@ -101,8 +97,7 @@ def test_main_check_invalid_paths_native(
     cfg_dir.mkdir()
     # create a fake torrent file path but ensure it's not present
     config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
+    config_yaml.write_text(f"""
 runtime: native
 docker_support: false
 chown: false
@@ -116,8 +111,7 @@ paths:
   host_config_dir: {cfg_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {cfg_dir}/presets.yaml
-"""
-    )
+""")
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
     monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")
@@ -140,8 +134,7 @@ def test_main_check_verbose_quiet_conflict(
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir()
     config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
+    config_yaml.write_text(f"""
 runtime: native
 docker_support: false
 chown: false
@@ -155,8 +148,7 @@ paths:
   host_config_dir: {cfg_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {cfg_dir}/presets.yaml
-"""
-    )
+""")
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
     monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")

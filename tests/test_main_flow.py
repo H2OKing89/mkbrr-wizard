@@ -59,8 +59,7 @@ def _mk_args(config_path: str) -> SimpleNamespace:
 @pytest.fixture
 def native_handler_cfg(tmp_path: Path, mkbrr_wizard: ModuleType) -> _HandlerConfig:
     config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
+    config_yaml.write_text(f"""
 runtime: native
 docker_support: false
 chown: false
@@ -71,8 +70,7 @@ paths:
   container_output_dir: /torrentfiles
   host_config_dir: {tmp_path}/cfg
   container_config_dir: /root/.config/mkbrr
-"""
-    )
+""")
     return cast(_HandlerConfig, mkbrr_wizard.load_config(config_yaml))
 
 
@@ -330,8 +328,7 @@ def test_main_create_inspect_check_native(
     torrent_file.write_text("torrent")
 
     config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
+    config_yaml.write_text(f"""
 runtime: native
 docker_support: false
 chown: false
@@ -345,8 +342,7 @@ paths:
   host_config_dir: {config_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {presets_yaml}
-"""
-    )
+""")
 
     # Monkeypatch parse_args to use our config
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
@@ -402,8 +398,7 @@ def test_main_docker_mode_build_and_exit(
 ) -> None:
     # simple docker-mode check: main should build docker commands and exit
     config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
+    config_yaml.write_text(f"""
 runtime: auto
 docker_support: true
 chown: false
@@ -417,8 +412,7 @@ paths:
   host_config_dir: {tmp_path}/cfg
   container_config_dir: /root/.config/mkbrr
 presets_yaml: presets.yaml
-"""
-    )
+""")
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
     # Force docker runtime selection

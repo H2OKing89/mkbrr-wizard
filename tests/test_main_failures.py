@@ -18,8 +18,7 @@ def test_create_failure_native(tmp_path, mkbrr_wizard: ModuleType, monkeypatch: 
     content_file.write_text("x")
 
     config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
+    config_yaml.write_text(f"""
 runtime: native
 docker_support: false
 chown: false
@@ -33,8 +32,7 @@ paths:
   host_config_dir: {cfg_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {cfg_dir}/presets.yaml
-"""
-    )
+""")
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
     monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "native")
@@ -64,8 +62,7 @@ def test_inspect_failure_docker(tmp_path, mkbrr_wizard: ModuleType, monkeypatch:
     torrent_file.write_text("tor")
 
     config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
+    config_yaml.write_text(f"""
 runtime: auto
 docker_support: true
 chown: false
@@ -79,8 +76,7 @@ paths:
   host_config_dir: {cfg_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {cfg_dir}/presets.yaml
-"""
-    )
+""")
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
     monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "docker")
@@ -114,8 +110,7 @@ def test_check_failure_docker(tmp_path, mkbrr_wizard: ModuleType, monkeypatch: A
     content_file.write_text("x")
 
     config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
+    config_yaml.write_text(f"""
 runtime: auto
 docker_support: true
 chown: false
@@ -129,8 +124,7 @@ paths:
   host_config_dir: {cfg_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {cfg_dir}/presets.yaml
-"""
-    )
+""")
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
     monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "docker")

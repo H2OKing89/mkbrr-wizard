@@ -15,8 +15,7 @@ def test_main_docker_full_flow(tmp_path, mkbrr_wizard: ModuleType, monkeypatch: 
     cfg_dir.mkdir()
     # Docker paths are like /data (container) and host path tmp_path
     config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        f"""
+    config_yaml.write_text(f"""
 runtime: auto
 docker_support: true
 chown: false
@@ -30,8 +29,7 @@ paths:
   host_config_dir: {cfg_dir}
   container_config_dir: /root/.config/mkbrr
 presets_yaml: {cfg_dir}/presets.yaml
-"""
-    )
+""")
 
     monkeypatch.setattr(mkbrr_wizard, "parse_args", lambda: _mk_args(str(config_yaml)))
     monkeypatch.setattr(mkbrr_wizard, "pick_runtime", lambda cfg, forced: "docker")

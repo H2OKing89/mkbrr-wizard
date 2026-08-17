@@ -5,6 +5,7 @@
 #   native = force local mkbrr binary
 runtime: auto
 
+# Docker is optional. Set this to false to prevent auto mode from selecting it.
 docker_support: true
 chown: true
 
@@ -42,24 +43,35 @@ mkbrr:
   image: ghcr.io/autobrr/mkbrr:v1.24.1
 
 paths:
+  # These are configurable examples for a typical Unraid layout.
   host_data_root: /mnt/user/data
   container_data_root: /data
 
   host_output_dir: /mnt/user/data/downloads/torrents/torrentfiles
   container_output_dir: /torrentfiles
 
-  # IMPORTANT for Docker runtime so presets.yaml is visible inside container
+  # Docker mounts this directory so presets.yaml is visible in the container.
   host_config_dir: /mnt/cache/appdata/mkbrr
   container_config_dir: /root/.config/mkbrr
 
 # You can use either an absolute path OR a path relative to host_config_dir
 presets_yaml: presets.yaml
 
-# Batch mode:
-#   simple   = preset-driven prompts (fast)
-#   advanced = includes per-job optional fields
+# Batch prompt style and disk-aware scheduler limits.
 batch:
+  # simple = preset-driven prompts; advanced = optional per-job fields
   mode: simple
+
+  # Optional positive per-job timeout in seconds; null disables the timeout.
+  job_timeout_seconds: null
+
+  # Global concurrency and per-physical-device limits for headless batch runs.
+  max_parallel_jobs: 1
+  hdd_parallel_per_device: 1
+  ssd_parallel_per_device: 2
+
+  # Optional cap for the sum of worker costs across active jobs; null disables it.
+  max_total_workers: null
 
 ownership:
   uid: 99
@@ -67,7 +79,6 @@ ownership:
 
 # Notification system — sends alerts via Pushover and/or Discord.
 # Both providers can be enabled simultaneously.
-# Requires: pip install 'httpx[http2]' (optional dep, gracefully disabled if missing)
 # Secrets can use env vars: ${PUSHOVER_APP_TOKEN}, ${DISCORD_WEBHOOK_URL}
 # Tip: put secrets in a .env file next to config.yaml (loaded automatically if python-dotenv is installed)
 notifications:
@@ -108,6 +119,3 @@ workers:
   hdd: 1        # spinning disks benefit from sequential I/O (1 worker)
   ssd: auto     # SSDs/NVMe handle parallel hashing well (let mkbrr auto-detect)
   default: auto # fallback when storage type can't be determined
-
-# Optional debug/test override - set to false in production if you want safer behaviour
-# docker_support: false

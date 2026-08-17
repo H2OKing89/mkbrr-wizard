@@ -1,285 +1,275 @@
 # mkbrr-wizard
 
-An interactive command-line wizard for working with [mkbrr](https://mkbrr.com) via Docker. This tool simplifies the process of creating, inspecting, and verifying torrent files on Unraid systems.
+`mkbrr-wizard` is an installable Python CLI for creating, inspecting, and checking
+torrents with [mkbrr](https://mkbrr.com). It keeps the Rich interactive wizard as
+the default experience and also provides headless commands for scripts, cron, and
+other automation. It can run mkbrr natively or through Docker and includes
+Unraid-aware path resolution and disk scheduling.
 
 ## Features
 
-- **Create torrents** from local files/folders using configurable presets
-- **Batch create torrents** with an interactive job builder (runs per-job `mkbrr create`)
-- **Inspect torrents** to view metadata and file structure
-- **Check/verify** local data against existing `.torrent` files
-- Automatic path translation between host and container paths
-- Preset management via `presets.yaml`
-- Automatic permission fixing for created `.torrent` files (Unraid's `nobody:users`)
+- Interactive create, inspect, check, and batch workflows
+- Headless `create`, `check`, `inspect`, `batch`, `plan`, `doctor`, and `schema`
+  commands
+- Native and Docker runtimes with configurable host/container path mapping
+- Strict, versioned YAML or JSON batch manifests and generated JSON Schema
+- Effective-plan previews with resolved paths, options, estimates, and warnings
+- Machine-readable JSON output and non-interactive dry runs
+- Disk-aware batch concurrency, atomic reports, and resumable runs
+- Optional Unraid split-share checks, worker tuning, ownership fixes, and alerts
+
+The application code uses the `src/mkbrr_wizard/` package. The root
+`mkbrr-wizard.py` file remains only as a compatibility launcher for existing source
+checkout workflows.
 
 ## Requirements
 
-- Python 3.10+
-- Docker
-- [mkbrr Docker image](https://mkbrr.com/installation#docker) (`ghcr.io/autobrr/mkbrr:v1.24.1`)
-- Python runtime dependencies: see `requirements.txt` (`pip install -r requirements.txt`)
-  - PyYAML (required)
-  - rich (UI)
-  - prompt_toolkit (optional, enhanced prompts)
+- Python 3.10 or newer
+- Linux or Unraid
+- One mkbrr runtime:
+  - a native `mkbrr` executable on `PATH`, or
+  - Docker and the configured mkbrr image
 
-## mkbrr Documentation
+Docker is optional. With `runtime: auto`, the wizard uses Docker when it is enabled
+and available, then falls back to the configured native binary.
 
-Full mkbrr docs are available at **<https://mkbrr.com>**. Local offline copies (fetched from the upstream site) are also included in this repository under [`docs/`](docs/):
+## Installation
 
-| File | Description | Online |
-| ---- | ----------- | ------ |
-| [`docs/installation.md`](docs/installation.md) | Installing mkbrr (binaries, Docker, package managers) | [mkbrr.com/installation](https://mkbrr.com/installation) |
-| [`docs/cli-reference-create.md`](docs/cli-reference-create.md) | `mkbrr create` — all flags and options | [mkbrr.com/cli-reference/create](https://mkbrr.com/cli-reference/create) |
-| [`docs/cli-reference-check-inspect.md`](docs/cli-reference-check-inspect.md) | `mkbrr check` and `mkbrr inspect` | [mkbrr.com/cli-reference/check](https://mkbrr.com/cli-reference/check) · [inspect](https://mkbrr.com/cli-reference/inspect) |
-| [`docs/presets.md`](docs/presets.md) | Presets (`presets.yaml`) — structure, options, overrides | [mkbrr.com/features/presets](https://mkbrr.com/features/presets) |
-| [`docs/batch-mode.md`](docs/batch-mode.md) | Batch mode (`batch.yaml`) — structure, options, examples | [mkbrr.com/features/batch-mode](https://mkbrr.com/features/batch-mode) |
+Clone the repository and install the package into a virtual environment:
 
-To refresh the local copies from upstream:
+```bash
+git clone https://github.com/H2OKing89/mkbrr-wizard.git
+cd mkbrr-wizard
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+mkbrr-wizard --config ./config.yaml init-config
+mkbrr-wizard --help
+```
+
+Use `python -m pip install -e ".[ui]"` for the optional prompt-toolkit UI or
+`python -m pip install -e ".[dev]"` for tests and code-quality tools.
+
+An installed `mkbrr-wizard` console command and `python -m mkbrr_wizard` are the
+preferred entry points. `./mkbrr-wizard.py` still works from a source checkout.
+
+## Configuration
+
+All runtime and path values are configured in YAML; editing Python source is not
+required. Create a user configuration with `mkbrr-wizard init-config`, or review
+the source [`config.yaml.sample`](config.yaml.sample). Without an explicit
+`--config`, the lookup order is:
+
+1. `MKBRR_WIZARD_CONFIG`
+2. `config.yaml` in a source checkout
+3. `$XDG_CONFIG_HOME/mkbrr-wizard/config.yaml`, or
+   `~/.config/mkbrr-wizard/config.yaml`
+
+`init-config` writes to the default user configuration path. Use
+`mkbrr-wizard --config /path/to/config.yaml init-config` for another location;
+it refuses to overwrite an existing file unless `--force` is supplied.
+
+Common settings include:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `runtime` | `auto` | Select `auto`, `docker`, or `native` |
+| `docker_support` | `true` | Allow Docker during automatic selection |
+| `mkbrr.binary` | `mkbrr` | Native executable name or path |
+| `mkbrr.image` | tested image | Docker image used for mkbrr |
+| `paths.host_data_root` | `/mnt/user/data` | Host content root |
+| `paths.container_data_root` | `/data` | Docker content mount |
+| `paths.host_output_dir` | Unraid example | Host torrent output directory |
+| `paths.container_output_dir` | `/torrentfiles` | Docker torrent output mount |
+| `paths.host_config_dir` | Unraid example | Host preset directory |
+| `presets_yaml` | `presets.yaml` | Relative to config directory or absolute |
+
+Use global flags before the command to override runtime or configuration for one
+invocation:
+
+```bash
+mkbrr-wizard --config /etc/mkbrr-wizard/config.yaml --native doctor
+mkbrr-wizard --docker create /mnt/user/data/release -P tracker
+```
+
+### Presets
+
+Create `presets.yaml` under `paths.host_config_dir`, or set `presets_yaml` to an
+absolute file:
+
+```yaml
+version: 1
+presets:
+  tracker:
+    trackers:
+      - https://tracker.example.com/announce
+    source: EXAMPLE
+    private: true
+```
+
+### Batch scheduler
+
+The headless scheduler can run different storage devices concurrently while
+limiting contention on each device. Conservative defaults serialize work:
+
+```yaml
+batch:
+  mode: simple
+  job_timeout_seconds: null
+  max_parallel_jobs: 1
+  hdd_parallel_per_device: 1
+  ssd_parallel_per_device: 2
+  max_total_workers: null
+```
+
+| Setting | Meaning |
+| --- | --- |
+| `mode` | `simple` or `advanced` prompts in the interactive batch builder |
+| `job_timeout_seconds` | Optional positive timeout for each mkbrr process |
+| `max_parallel_jobs` | Maximum jobs running across all devices |
+| `hdd_parallel_per_device` | Maximum concurrent jobs for one detected HDD |
+| `ssd_parallel_per_device` | Jobs per detected SSD/NVMe |
+| `max_total_workers` | Optional aggregate worker budget across active jobs |
+
+The four concurrency limits also have corresponding `batch` and `plan` command
+flags, which override the configuration for that run or preview.
+
+## Usage
+
+Running without a subcommand opens the interactive wizard. The explicit form is
+useful in aliases and service definitions:
+
+```bash
+mkbrr-wizard
+mkbrr-wizard interactive
+```
+
+Headless commands never prompt:
+
+| Command | Purpose |
+| --- | --- |
+| `create PATH -P PRESET` | Create one torrent |
+| `inspect TORRENT` | Inspect torrent metadata |
+| `check TORRENT CONTENT` | Verify local content |
+| `batch MANIFEST -P PRESET` | Validate and execute a batch manifest |
+| `plan MANIFEST -P PRESET` | Preview a batch without executing it |
+| `doctor` | Validate configuration, runtime, presets, and directories |
+| `schema [DESTINATION]` | Print or write the generated batch JSON Schema |
+
+Run `mkbrr-wizard COMMAND --help` for all command-specific options.
+
+### Headless examples
+
+```bash
+# Preview a create operation as JSON without running mkbrr.
+mkbrr-wizard create /mnt/user/data/release -P tracker --dry-run --json
+
+# Create with explicit metadata and output.
+mkbrr-wizard create /mnt/user/data/release -P tracker \
+  --output /mnt/user/data/torrents/release.torrent \
+  --source EXAMPLE --private --piece-length 22
+
+# Inspect or verify without prompts.
+mkbrr-wizard inspect /mnt/user/data/torrents/release.torrent --verbose
+mkbrr-wizard check /mnt/user/data/torrents/release.torrent \
+  /mnt/user/data/release --workers 2
+
+# Validate readiness and export the manifest schema.
+mkbrr-wizard doctor --json
+mkbrr-wizard schema batch.schema.json
+```
+
+### Batch manifests
+
+The `batch` and `plan` commands accept strict version-1 YAML or JSON. Paths in a
+manifest must be absolute, output paths must be unique, and unknown fields are
+rejected.
+
+```yaml
+version: 1
+jobs:
+  - path: /mnt/user/data/movies/release-one
+    output: /mnt/user/data/torrents/release-one.torrent
+  - path: /mnt/user/data/movies/release-two
+    output: /mnt/user/data/torrents/release-two.torrent
+    trackers:
+      - https://tracker.example.com/announce
+    source: EXAMPLE
+    private: true
+    exclude_patterns:
+      - "*.nfo"
+```
+
+Preview the resolved paths, storage devices, effective options, estimates, and
+warnings before execution:
+
+```bash
+mkbrr-wizard plan batch.yaml -P tracker --show-command
+mkbrr-wizard batch batch.yaml -P tracker --dry-run --json
+```
+
+Run the manifest with an atomic report. Reusing that report with `--resume` skips
+jobs already recorded as successful:
+
+```bash
+mkbrr-wizard batch batch.yaml -P tracker --report runs/batch.json
+mkbrr-wizard batch batch.yaml -P tracker --report runs/batch.json --resume
+```
+
+### Output and automation options
+
+- `--dry-run` builds and validates a plan without executing mkbrr. `plan` is always
+  non-executing.
+- `--json` emits machine-readable plans, results, or errors for headless commands.
+- `--show-command` includes the raw command in the terminal plan preview.
+- `--no-estimate` skips recursive file-count and size estimation.
+- `--report FILE` writes batch progress atomically after completed jobs.
+- `--resume` requires `--report` and skips successful operations in that report.
+
+Headless exit codes are stable for automation:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Every requested operation succeeded or was already complete |
+| `1` | An mkbrr operation failed, or a mixed run timed out |
+| `2` | Invalid input/setup, or a safety precondition blocked execution |
+| `124` | The run timed out without any successful operation |
+| `130` | Cancelled by the user |
+
+JSON errors contain `ok`, `exit_code`, and `error`; completed JSON runs also
+include the resolved plan, per-operation results, summary counts, and event log.
+
+## Path handling and Unraid
+
+Host and container roots are mappings from `config.yaml`, not fixed constants. For
+example, the default sample maps `/mnt/user/data/releases/file.mkv` to
+`/data/releases/file.mkv` in Docker. Torrent paths are similarly mapped through
+the configured output roots.
+
+When `unraid.enabled` is true, the planner can resolve `/mnt/user` shares to
+physical `/mnt/diskN` or `/mnt/cache*` paths, detect split shares before hashing,
+and schedule work by physical device. Review the documented options in
+[`config.yaml.sample`](config.yaml.sample), especially `mount_priority` and the
+`split_share_*` policies.
+
+## mkbrr documentation
+
+The complete upstream documentation is at [mkbrr.com](https://mkbrr.com). Offline
+references are included in [`docs/`](docs/), covering installation, create,
+check/inspect, presets, and batch mode. Refresh them with:
 
 ```bash
 bash scripts/update-mkbrr-docs.sh
 ```
 
-## Installation
-
-1. Clone or download this repository:
-
-   ```bash
-   git clone https://github.com/H2OKing89/mkbrr-wizard /mnt/cache/scripts/mkbrr-wizard
-   ```
-
-2. Install the required Python dependencies (recommended):
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-   Optional extras:
-
-   - UI enhancements: `prompt_toolkit` — install with:
-
-     ```bash
-     pip install prompt_toolkit
-     ```
-
-     or if you prefer editable install with extras:
-
-     ```bash
-     pip install -e .[ui]
-     ```
-
-   - Developer tools (for testing/linting/formatting):
-
-     ```bash
-     pip install -e .[dev]
-     ```
-
-     or via requirements file:
-
-     ```bash
-     pip install -r requirements-dev.txt
-     ```
-
-3. Make the script executable:
-
-   ```bash
-   chmod +x /mnt/cache/scripts/mkbrr-wizard/mkbrr-wizard.py
-   ```
-
-4. (Optional) Create a symbolic link for easier access:
-
-   ```bash
-   ln -s /mnt/cache/scripts/mkbrr-wizard/mkbrr-wizard.py /usr/local/bin/mkbrr-wizard
-   ```
-
-## Configuration
-
-The wizard uses hardcoded paths that are designed for Unraid systems. You may need to adjust these in the script:
-
-| Variable | Default | Description |
-| -------- | ------- | ----------- |
-| `HOST_DATA_ROOT` | `/mnt/user/data` | Host path for data files |
-| `CONTAINER_DATA_ROOT` | `/data` | Container mount point for data |
-| `HOST_OUTPUT_DIR` | `/mnt/user/data/downloads/torrents/torrentfiles` | Where `.torrent` files are saved |
-| `HOST_CONFIG_DIR` | `/mnt/cache/appdata/mkbrr` | mkbrr config directory (contains `presets.yaml`) |
-| `TARGET_UID` / `TARGET_GID` | `99` / `100` | Ownership for created `.torrent` files |
-
-### Presets
-
-Create a `presets.yaml` file in the config directory (`/mnt/cache/appdata/mkbrr/presets.yaml`):
-
-```yaml
-presets:
-  btn:
-    announce: https://tracker.example.com/announce
-    source: BTN
-    private: true
-  mam:
-    announce: https://tracker2.example.com/announce
-    source: MAM
-    private: true
-```
-
-### Batch Mode
-
-Configure batch prompt style in `config.yaml`:
-
-```yaml
-batch:
-  mode: simple
-```
-
-- `simple` (default): asks only preset, job count, content path, and output path.
-- `advanced`: also asks per-job optional fields (`trackers`, `private`, `piece_length`, etc.).
-
-### Unraid Options
-
-Configure Unraid-specific path and split-share behavior in `config.yaml`:
-
-```yaml
-unraid:
-  enabled: true
-  fuse_root: /mnt/user
-  mount_priority: disk_first
-  split_share_preflight: fail
-  split_share_unmapped_docker_path: warn
-  split_share_max_entries: 20000
-  split_share_follow_symlinks: false
-```
-
-- `mount_priority`
-  - `disk_first` (default): prefers `/mnt/diskN` if both disk and cache have the same path.
-  - `cache_first`: prefers `/mnt/cache*` first.
-- `split_share_preflight`
-  - `fail`: aborts before mkbrr when split-share mismatch is detected.
-  - `warn`: prints warning and continues.
-  - `off`: disables split-share preflight.
-- `split_share_unmapped_docker_path`
-  - Controls behavior when docker job/content paths are outside `container_data_root` and cannot be safely preflight-checked.
-  - Values: `off`, `warn` (default), `fail`.
-
-## Usage
-
-Run the wizard:
+## Development
 
 ```bash
-./mkbrr-wizard.py
-```
-
-Or if you created a symlink:
-
-```bash
-mkbrr-wizard
-```
-
-### Main Menu
-
-```text
-🧰 What do you want to do?
-  [1] Create a torrent from a file/folder   (mkbrr create)
-  [2] Inspect an existing .torrent file     (mkbrr inspect)
-  [3] Check data against a .torrent file    (mkbrr check)
-  [4] Batch create torrents                 (mkbrr create per-job)
-  [q] Quit
-```
-
-### Creating a Torrent
-
-1. Select option `1` (or press Enter for default)
-2. Choose a preset from the list (loaded from `presets.yaml`)
-3. Enter the path to the file or folder
-4. Confirm the command to run
-5. The wizard will automatically fix permissions on created `.torrent` files
-
-### Inspecting a Torrent
-
-1. Select option `2`
-2. Enter the path to the `.torrent` file
-3. Optionally enable verbose mode for detailed metadata
-4. Confirm to run
-
-### Checking/Verifying Data
-
-1. Select option `3`
-2. Enter the path to the `.torrent` file
-3. Enter the path to the local content to verify
-4. Configure options:
-   - **Verbose**: Show detailed verification info
-   - **Quiet**: Only show final status/percentage
-   - **Workers**: Number of parallel workers (leave empty for automatic)
-5. Confirm to run
-
-### Batch Creating Torrents
-
-1. Select option `4`
-2. Choose a required preset (used for the entire batch run)
-3. Enter how many jobs to build
-4. For each job, provide:
-   - source content path (`path`)
-   - output `.torrent` path (`output`) (press Enter to use `host_output_dir/<content-name>.torrent`)
-5. In `batch.mode: advanced`, the wizard additionally prompts for optional per-job metadata.
-6. The wizard auto-maps paths for the active runtime (native/docker)
-7. The generated batch payload is validated against the bundled schema before execution
-8. The wizard executes each job as its own `mkbrr create` command, continuing through failures
-9. A final results table is printed with per-job exit codes; permission fix runs once at end if any job succeeded
-
-Batch mode in this wizard is interactive-builder only; importing an existing batch file is not included.
-
-## Path Handling
-
-The wizard automatically translates between host paths and container paths:
-
-| Host Path | Container Path |
-| ----------- | ---------------- |
-| `/mnt/user/data/downloads/file.mkv` | `/data/downloads/file.mkv` |
-| `/mnt/user/data/downloads/torrents/torrentfiles/example.torrent` | `/torrentfiles/example.torrent` |
-
-You can enter either format — the wizard will convert as needed.
-
-## Example Session
-
-```text
-==========================================
-  🧙 mkbrr Helper – Torrent Creator Wizard
-==========================================
-
-🧰 What do you want to do?
-  [1] Create a torrent from a file/folder   (mkbrr create)
-  [2] Inspect an existing .torrent file     (mkbrr inspect)
-  [3] Check data against a .torrent file    (mkbrr check)
-  [q] Quit
-
-Choose an option [1/2/3/q]: 1
-
-🎛  Preset selection (-P) (from /mnt/cache/appdata/mkbrr/presets.yaml):
-  [1] btn
-  [2] mam
-
-Choose preset [1-2 or name]: 1
-
-🎚  Selected preset: btn
-
-📂 Enter the path to the file or folder:
-   - You can paste a *host* path (e.g. /mnt/user/data/...)
-   - Or a *container* path (e.g. /data/downloads/...)
-
-Path: /mnt/user/data/downloads/my-release
-✅ Host path exists: /mnt/user/data/downloads/my-release
-🧩 Using container path inside mkbrr: /data/downloads/my-release
-
-🚀 About to run:
-    docker run --rm -it -w /root/.config/mkbrr -v /mnt/user/data:/data -v /mnt/user/data/downloads/torrents/torrentfiles:/torrentfiles -v /mnt/cache/appdata/mkbrr:/root/.config/mkbrr ghcr.io/autobrr/mkbrr:v1.24.1 mkbrr create /data/downloads/my-release -P btn --output-dir /torrentfiles
-
-Proceed? [Y/n]: y
-
-🛠  Running mkbrr create... (Ctrl+C to abort)
-...
-✅ mkbrr create finished.
-🔐 Fixing ownership of .torrent files under /mnt/user/data/downloads/torrents/torrentfiles ...
-  🔧 chown 99:100 -> /mnt/user/data/downloads/torrents/torrentfiles/my-release.torrent
-
-🔄 Do another operation? [y/N]: n
-👋 Bye.
+python -m pip install -e ".[dev]"
+pytest
+ruff check .
+mypy src tests
+black --check src tests mkbrr-wizard.py
 ```
 
 ## License
