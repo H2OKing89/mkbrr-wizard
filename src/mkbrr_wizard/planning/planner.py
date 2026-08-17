@@ -185,13 +185,13 @@ def _estimate_content(path: str, *, max_entries: int = 100_000) -> tuple[int | N
 
     file_count = 0
     size_bytes = 0
-
-    def _walk(directory: str) -> bool:
-        nonlocal file_count, size_bytes
+    directories = [path]
+    while directories:
+        directory = directories.pop()
         try:
             entries = os.scandir(directory)
         except OSError:
-            return True
+            continue
         with entries:
             for entry in entries:
                 try:
@@ -199,20 +199,15 @@ def _estimate_content(path: str, *, max_entries: int = 100_000) -> tuple[int | N
                 except OSError:
                     continue
                 if is_dir:
-                    if not _walk(entry.path):
-                        return False
+                    directories.append(entry.path)
                     continue
                 file_count += 1
                 if file_count > max_entries:
-                    return False
+                    return None, None
                 try:
                     size_bytes += entry.stat(follow_symlinks=False).st_size
                 except OSError:
                     continue
-        return True
-
-    if not _walk(path):
-        return None, None
     return file_count, size_bytes
 
 

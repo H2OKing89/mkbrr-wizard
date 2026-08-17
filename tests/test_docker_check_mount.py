@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -51,7 +50,7 @@ def _allow_paths(monkeypatch: pytest.MonkeyPatch, *existing: str) -> None:
     monkeypatch.setattr(os.path, "isfile", lambda p: p in allowed)
 
 
-def _resolve_to_disk5(cfg: Any, raw: str, **_: Any) -> str:
+def _resolve_to_disk5(_cfg: legacy.AppCfg, raw: str, **_: object) -> str:
     return raw.replace("/mnt/user", "/mnt/disk5")
 
 
